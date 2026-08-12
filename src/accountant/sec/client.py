@@ -95,6 +95,10 @@ class SecClient:
     def normalize_cik(self, cik: str | int) -> str:
         return normalize_cik(cik)
 
+    def cik_without_leading_zeros(self, cik: str | int) -> str:
+        padded = self.normalize_cik(cik)
+        return str(int(padded))
+
     def resolve_ticker(self, ticker: str) -> TickerResolution:
         symbol = normalize_ticker(ticker)
         mapping = self._load_ticker_map()

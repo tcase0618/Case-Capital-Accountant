@@ -4,10 +4,13 @@ Deterministic accounting and fundamental research system for Case Capital.
 
 THE ACCOUNTANT ingests SEC EDGAR data, stores it immutably, and will later reconstruct statements and compute versioned metrics in Python and SQL. It contains **no LLM integrations**. Coding assistants may write the code; the running system does not call models.
 
-This repository currently implements **Prompt 1**: project foundation + SEC company-submissions / filing-metadata ingestion.
+This repository currently implements **Prompt 1 + Prompt 2**:
+- **Prompt 1**: Project foundation + SEC company-submissions / filing-metadata ingestion
+- **Prompt 2**: CompanyFacts API ingestion + raw XBRL fact normalization
 
-## What this milestone does
+## What these milestones do
 
+### Prompt 1
 - Project skeleton: `uv`, FastAPI, Pydantic, SQLAlchemy, Alembic, PostgreSQL, DuckDB, Parquet, Typer, Rich, pytest, Ruff, Docker Compose, structured logging
 - Tables: `companies`, `securities`, `filings`, `filing_documents`, `raw_facts`
 - `SecClient` with SEC User-Agent, ticker → CIK, rate limiting, retries, backoff
@@ -15,7 +18,16 @@ This repository currently implements **Prompt 1**: project foundation + SEC comp
 - CLI: `doctor`, `company`, `ingest filings`, `filing latest`
 - `GET /health`
 
-It does **not** yet parse XBRL, CompanyFacts, Arelle, statements, formulas, valuation, or forensics.
+### Prompt 2
+- SEC CompanyFacts API client (`CompanyFactsClient`)
+- Raw XBRL fact ingestion with deterministic hashing
+- Fact deduplication (identical facts → same hash)
+- Filing linkage (accession number → filing)
+- Extended `raw_facts` table with XBRL metadata (concept, taxonomy, unit, period, form, label, etc.)
+- CLI: `ingest-companyfacts TICKER`, `facts TICKER`, `companyconcept TICKER TAXONOMY CONCEPT`
+- Documentation: `docs/companyfacts.md`
+
+They do **not** yet parse Arelle-validated XBRL instances, canonicalize taxonomy, resolve periods, reconstruct statements, compute formulas, or perform valuation/forensics.
 
 ## Requirements
 
@@ -42,11 +54,31 @@ uv run accountant doctor
 
 ## CLI
 
+### Core Commands
+
 ```bash
-uv run accountant doctor
-uv run accountant company AAPL
-uv run accountant ingest filings AAPL
-uv run accountant filing latest AAPL
+uv run accountant doctor                               # Check configuration & environment
+uv run accountant company AAPL                         # Look up company by ticker
+uv run accountant ingest filings AAPL                  # Ingest SEC filing metadata
+uv run accountant filing latest AAPL                   # Get latest filing
+```
+
+### CompanyFacts Commands (Prompt 2)
+
+```bash
+# Ingest XBRL facts from SEC CompanyFacts API
+# (requires: SEC_USER_AGENT set, company already ingested via `ingest filings`)
+uv run accountant ingest-companyfacts AAPL
+
+# Query raw XBRL facts with optional filters
+uv run accountant facts AAPL                           # All facts for AAPL
+uv run accountant facts AAPL --concept Assets          # Filter by concept
+uv run accountant facts AAPL --taxonomy us-gaap        # Filter by taxonomy
+uv run accountant facts AAPL --form 10-K               # Filter by form
+uv run accountant facts AAPL --limit 50                # Limit results
+
+# Retrieve historical data for a single concept
+uv run accountant companyconcept AAPL us-gaap Assets
 ```
 
 `accountant doctor` checks configuration, the configured database, DuckDB, required directories, and the Python environment.
