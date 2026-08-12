@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.env
+data/raw/**
+data/duckdb/**
+data/parquet/**
+!data/**/.gitkeep
+reports
+tests
+*.egg-info
+dist
+build

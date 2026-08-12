@@ -1,0 +1,33 @@
+# Environment
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local data (immutable raw dumps stay untracked unless explicitly added)
+data/raw/*
+data/duckdb/*
+data/parquet/*
+!data/raw/.gitkeep
+!data/duckdb/.gitkeep
+!data/parquet/.gitkeep
+*.duckdb
+*.duckdb.wal
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
