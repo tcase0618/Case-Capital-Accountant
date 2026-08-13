@@ -14,6 +14,7 @@ classifiers = [
 ]
 dependencies = [
     "alembic>=1.14.0",
+    "arelle-release>=2.30.0",
     "duckdb>=1.2.0",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",

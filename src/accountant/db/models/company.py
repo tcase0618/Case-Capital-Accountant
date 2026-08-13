@@ -11,8 +11,11 @@ from accountant.db.base import Base
 from accountant.db.types import UUID
 
 if TYPE_CHECKING:
+    from accountant.db.models.calculation_result import CalculationResult
     from accountant.db.models.filing import Filing
+    from accountant.db.models.financial_period import FinancialPeriod
     from accountant.db.models.raw_fact import RawFact
+    from accountant.db.models.research_record import ResearchRecord
     from accountant.db.models.security import Security
 
 
@@ -45,6 +48,15 @@ class Company(Base):
         back_populates="company", cascade="all, delete-orphan"
     )
     raw_facts: Mapped[list[RawFact]] = relationship(back_populates="company")
+    financial_periods: Mapped[list[FinancialPeriod]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+    calculation_results: Mapped[list[CalculationResult]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+    research_records: Mapped[list[ResearchRecord]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Company cik={self.cik} name={self.name!r}>"
