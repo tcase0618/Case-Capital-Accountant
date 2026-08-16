@@ -5,11 +5,14 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 class Settings(BaseSettings):
     """Runtime configuration. LLM API keys are forbidden in this project."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_REPO_ROOT / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -17,11 +20,23 @@ class Settings(BaseSettings):
 
     sec_user_agent: str = Field(default="", description="SEC-compliant User-Agent")
     database_url: str = Field(
-        default="postgresql+psycopg://accountant:accountant@localhost:5432/accountant"
+        default="sqlite:///./data/accountant.db"
     )
     accountant_env: str = Field(default="development")
     log_level: str = Field(default="INFO")
     data_dir: Path = Field(default=Path("./data"))
+    market_data_mode: str = Field(default="research_only")
+    ibkr_enabled: bool = Field(default=False)
+    ibkr_host: str = Field(default="127.0.0.1")
+    ibkr_port: int = Field(default=7497)
+    ibkr_client_id: int = Field(default=91)
+    ibkr_read_only: bool = Field(default=True)
+    ibkr_account_id: str | None = Field(default=None)
+    machine_enabled: bool = Field(default=True)
+    machine_interval_seconds: int = Field(default=15)
+    machine_universes: str = Field(default="sp500,nasdaq,russell2000")
+    machine_batch_size: int = Field(default=10)
+    machine_workers: int = Field(default=3)
 
     sec_base_www: str = Field(default="https://www.sec.gov")
     sec_base_data: str = Field(default="https://data.sec.gov")
@@ -35,6 +50,12 @@ class Settings(BaseSettings):
     @classmethod
     def _upper_log_level(cls, value: str) -> str:
         return value.upper()
+
+    @field_validator("market_data_mode")
+    @classmethod
+    def _normalize_market_data_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        return normalized or "research_only"
 
     @field_validator("data_dir", mode="before")
     @classmethod

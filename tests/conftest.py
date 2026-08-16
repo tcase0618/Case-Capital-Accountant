@@ -2,6 +2,7 @@
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from accountant.config import Settings, clear_settings_cache
 from accountant.db import Base, create_session_factory
@@ -23,7 +24,11 @@ def test_settings():
 @pytest.fixture
 def test_engine(test_settings):
     """In-memory SQLite database engine."""
-    engine = create_engine(test_settings.database_url, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        test_settings.database_url,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     yield engine
     engine.dispose()

@@ -11,6 +11,7 @@ from accountant.taxonomy.mappings import (
     get_mapping_rule,
     get_mapping_rules,
 )
+from accountant.taxonomy.seed import ensure_canonical_taxonomy_seeded
 
 __all__ = [
     "CanonicalConceptDef",
@@ -20,4 +21,5 @@ __all__ = [
     "get_mapping_rules",
     "get_mapping_rule",
     "find_mapping_candidates",
+    "ensure_canonical_taxonomy_seeded",
 ]

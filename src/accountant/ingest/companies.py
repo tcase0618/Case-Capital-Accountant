@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -9,8 +10,20 @@ from accountant.db.models import Company, Security
 from accountant.domain.cik import normalize_cik
 from accountant.domain.ticker import normalize_ticker
 from accountant.logging import get_logger
+from accountant.sec import SecClient
 
 log = get_logger(__name__)
+
+
+@dataclass
+class BulkCompanyImportResult:
+    requested: int
+    imported: int
+    existing: int
+    unresolved: list[str]
+    invalid: list[str]
+    imported_tickers: list[str]
+    mode: str
 
 
 def upsert_company_and_securities(
@@ -62,6 +75,148 @@ def upsert_company_and_securities(
     session.flush()
     log.info("ingest.company_upserted", cik=cik, name=company.name, created=created)
     return company
+
+
+def import_companies_from_tickers(
+    session: Session,
+    tickers: list[str],
+    sec_client: SecClient,
+) -> BulkCompanyImportResult:
+    """Resolve a bulk list of tickers from SEC and upsert company registry entries."""
+    requested = len(tickers)
+    imported = 0
+    existing = 0
+    unresolved: list[str] = []
+    invalid: list[str] = []
+    imported_tickers: list[str] = []
+    seen: set[str] = set()
+    mapping = sec_client.get_company_tickers()
+
+    for raw_ticker in tickers:
+        try:
+            symbol = normalize_ticker(raw_ticker)
+        except Exception:
+            invalid.append(str(raw_ticker).strip())
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+
+        resolution = mapping.get(symbol)
+        if resolution is None:
+            unresolved.append(symbol)
+            continue
+
+        company = session.execute(select(Company).where(Company.cik == resolution.cik)).scalar_one_or_none()
+        created = company is None
+        if company is None:
+            company = Company(cik=resolution.cik, name=resolution.name, entity_type="operating")
+            session.add(company)
+            session.flush()
+
+        company.name = resolution.name
+        _upsert_security(session, company, resolution.ticker, None)
+        imported_tickers.append(resolution.ticker)
+        if created:
+            imported += 1
+        else:
+            existing += 1
+
+    session.flush()
+    log.info(
+        "ingest.bulk_company_registry",
+        requested=requested,
+        imported=imported,
+        existing=existing,
+        unresolved=len(unresolved),
+        invalid=len(invalid),
+    )
+    return BulkCompanyImportResult(
+        requested=requested,
+        imported=imported,
+        existing=existing,
+        unresolved=unresolved,
+        invalid=invalid,
+        imported_tickers=imported_tickers,
+        mode="sec_registry",
+    )
+
+
+def import_watchlist_tickers(
+    session: Session,
+    tickers: list[str],
+) -> BulkCompanyImportResult:
+    """Create local research-watchlist companies when SEC resolution is unavailable."""
+    requested = len(tickers)
+    imported = 0
+    existing = 0
+    unresolved: list[str] = []
+    invalid: list[str] = []
+    imported_tickers: list[str] = []
+    seen: set[str] = set()
+
+    for raw_ticker in tickers:
+        try:
+            symbol = normalize_ticker(raw_ticker)
+        except Exception:
+            invalid.append(str(raw_ticker).strip())
+            continue
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+
+        security = session.execute(select(Security).where(Security.ticker == symbol)).scalar_one_or_none()
+        if security is not None:
+            existing += 1
+            imported_tickers.append(symbol)
+            continue
+
+        company = Company(
+            cik=_next_watchlist_cik(session),
+            name=symbol,
+            entity_type="research-watchlist",
+            sic_description="Local watchlist import",
+        )
+        session.add(company)
+        session.flush()
+        session.add(
+            Security(
+                company_id=company.id,
+                ticker=symbol,
+                exchange=None,
+                security_type="common_stock",
+            )
+        )
+        imported += 1
+        imported_tickers.append(symbol)
+
+    session.flush()
+    log.info(
+        "ingest.bulk_watchlist_registry",
+        requested=requested,
+        imported=imported,
+        existing=existing,
+        invalid=len(invalid),
+    )
+    return BulkCompanyImportResult(
+        requested=requested,
+        imported=imported,
+        existing=existing,
+        unresolved=unresolved,
+        invalid=invalid,
+        imported_tickers=imported_tickers,
+        mode="local_watchlist",
+    )
+
+
+def _next_watchlist_cik(session: Session) -> str:
+    index = 1
+    while True:
+        candidate = f"WL{index:08d}"
+        exists = session.execute(select(Company.id).where(Company.cik == candidate)).scalar_one_or_none()
+        if exists is None:
+            return candidate
+        index += 1
 
 
 def _upsert_security(

@@ -62,6 +62,7 @@ class CanonicalFactIngestion:
         """
         self.session = session
         self.arelle = arelle
+        self._ensure_taxonomy_seeded()
 
     def ingest_filing(
         self,
@@ -232,6 +233,11 @@ class CanonicalFactIngestion:
         errors = [f"{e.level}: {e.message}" for e in result.errors]
 
         return result.is_valid, errors
+
+    def _ensure_taxonomy_seeded(self) -> None:
+        from accountant.taxonomy import ensure_canonical_taxonomy_seeded
+
+        ensure_canonical_taxonomy_seeded(self.session)
 
 
 def query_canonical_facts(

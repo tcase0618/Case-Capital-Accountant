@@ -100,57 +100,19 @@ def ingest_company_facts_for_company(
         except Exception:
             pass
 
-        # Fetch CompanyFacts
         log.info("companyfacts.ingest_start", cik=cik, ticker=ticker)
         facts_data = companyfacts_client.get_company_facts(cik)
-
-        # Iterate taxonomies
-        for taxonomy, concepts in facts_data.items():
-            if taxonomy == "cik":
-                continue
-            if not isinstance(concepts, dict):
-                continue
-
-            # Iterate concepts
-            for concept, concept_data in concepts.items():
-                if not isinstance(concept_data, dict):
-                    continue
-
-                concepts_processed += 1
-                label = concept_data.get("label", "")
-                description = concept_data.get("description")
-                units_data = concept_data.get("units", {})
-
-                if not isinstance(units_data, dict):
-                    continue
-
-                # Iterate units for this concept
-                for unit, facts_list in units_data.items():
-                    if not isinstance(facts_list, list):
-                        continue
-
-                    for fact in facts_list:
-                        try:
-                            inserted = _ingest_single_fact(
-                                session=session,
-                                company_id=str(company.id),
-                                company_cik=cik,
-                                taxonomy=taxonomy,
-                                concept=concept,
-                                label=label,
-                                description=description,
-                                unit=unit,
-                                fact_dict=fact,
-                            )
-                            if inserted:
-                                facts_inserted += 1
-                            else:
-                                facts_skipped += 1
-                        except Exception as e:
-                            errors.append(
-                                f"fact error (tax={taxonomy}, concept={concept}, "
-                                f"unit={unit}): {str(e)[:100]}"
-                            )
+        (
+            concepts_processed,
+            facts_inserted,
+            facts_skipped,
+            payload_errors,
+        ) = ingest_company_facts_payload(
+            session=session,
+            company=company,
+            facts_data=facts_data,
+        )
+        errors.extend(payload_errors)
 
         log.info(
             "companyfacts.ingest_complete",
@@ -176,6 +138,69 @@ def ingest_company_facts_for_company(
         facts_skipped=facts_skipped,
         errors=errors,
     )
+
+
+def ingest_company_facts_payload(
+    session: Session,
+    company: Company,
+    facts_data: dict[str, Any],
+) -> tuple[int, int, int, list[str]]:
+    """Persist an already-fetched CompanyFacts payload.
+
+    This lets callers fetch SEC data outside any database write lock and only
+    serialize the actual inserts.
+    """
+    cik = company.cik
+    concepts_processed = 0
+    facts_inserted = 0
+    facts_skipped = 0
+    errors: list[str] = []
+
+    facts_root = facts_data.get("facts", facts_data)
+    for taxonomy, concepts in facts_root.items():
+        if not isinstance(concepts, dict):
+            continue
+
+        for concept, concept_data in concepts.items():
+            if not isinstance(concept_data, dict):
+                continue
+
+            concepts_processed += 1
+            label = concept_data.get("label", "")
+            description = concept_data.get("description")
+            units_data = concept_data.get("units", {})
+
+            if not isinstance(units_data, dict):
+                continue
+
+            for unit, facts_list in units_data.items():
+                if not isinstance(facts_list, list):
+                    continue
+
+                for fact in facts_list:
+                    try:
+                        inserted = _ingest_single_fact(
+                            session=session,
+                            company_id=str(company.id),
+                            company_cik=cik,
+                            taxonomy=taxonomy,
+                            concept=concept,
+                            label=label,
+                            description=description,
+                            unit=unit,
+                            fact_dict=fact,
+                        )
+                        if inserted:
+                            facts_inserted += 1
+                        else:
+                            facts_skipped += 1
+                    except Exception as e:
+                        errors.append(
+                            f"fact error (tax={taxonomy}, concept={concept}, "
+                            f"unit={unit}): {str(e)[:100]}"
+                        )
+
+    return concepts_processed, facts_inserted, facts_skipped, errors
 
 
 def _ingest_single_fact(
@@ -215,7 +240,7 @@ def _ingest_single_fact(
     # Extract period information
     start_str = fact_dict.get("start")
     end_str = fact_dict.get("end")
-    instant_str = fact_dict.get("fy")  # 'fy' field if available in some responses
+    instant_str = fact_dict.get("instant")
 
     # Parse dates
     start_date = parse_date(start_str) if start_str else None
@@ -228,7 +253,9 @@ def _ingest_single_fact(
 
     # Extract optional metadata
     decimals_raw = fact_dict.get("decimals")
-    decimals = int(decimals_raw) if decimals_raw is not None else None
+    decimals = None
+    with contextlib.suppress(TypeError, ValueError):
+        decimals = int(decimals_raw) if decimals_raw is not None else None
 
     # Parse fiscal year and period from 'fy' field or frame
     fiscal_year = None
@@ -274,13 +301,14 @@ def _ingest_single_fact(
 
     # Find filing if accession is known
     filing_id = None
+    company_uuid = uuid.UUID(company_id)
     if accession:
         from accountant.db.models import Filing
 
         filing = (
             session.query(Filing)
             .filter(Filing.accession_number == accession)
-            .filter(Filing.company_id == company_id)
+            .filter(Filing.company_id == company_uuid)
             .first()
         )
         if filing:

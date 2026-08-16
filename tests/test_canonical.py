@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from accountant.db.models import CanonicalConcept, CanonicalFact, CanonicalMapping
 from accountant.ingest.canonical_mapper import CanonicalMapper, MappingResult
 from accountant.taxonomy import get_canonical_registry
+from accountant.taxonomy.seed import ensure_canonical_taxonomy_seeded
 from accountant.xbrl import ArelleFacade
 
 
@@ -194,6 +195,19 @@ class TestCanonicalModels:
         test_session.commit()
 
         assert canonical_fact.raw_fact_id == raw_fact.id
+
+    def test_seed_canonical_taxonomy(self, test_session: Session):
+        """Test canonical concepts and mappings seed into the database."""
+        stats = ensure_canonical_taxonomy_seeded(test_session)
+        test_session.commit()
+
+        concept_count = test_session.query(CanonicalConcept).count()
+        mapping_count = test_session.query(CanonicalMapping).count()
+
+        assert stats["concepts_inserted"] > 0
+        assert stats["mappings_inserted"] > 0
+        assert concept_count >= 40
+        assert mapping_count > 0
 
 
 class TestCanonicalMapper:

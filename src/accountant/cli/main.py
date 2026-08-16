@@ -6,7 +6,7 @@ from rich.table import Table
 
 from accountant.config import get_settings
 from accountant.db import create_db_engine, session_scope
-from accountant.db.models import Company
+from accountant.db.models import Company, Security
 from accountant.ingest.companyfacts import (
     ingest_company_facts_for_company,
     query_facts,
@@ -19,6 +19,15 @@ from accountant.taxonomy import get_canonical_registry
 
 app = typer.Typer(help="THE ACCOUNTANT — deterministic accounting research system.")
 console = Console()
+
+
+def _lookup_company_by_ticker(session, ticker: str) -> Company | None:
+    return (
+        session.query(Company)
+        .join(Security, Security.company_id == Company.id)
+        .filter(Security.ticker == ticker.upper())
+        .first()
+    )
 
 
 @app.callback()
@@ -39,6 +48,20 @@ def doctor() -> None:
     # SEC User-Agent
     sec_ua_ok = bool(settings.sec_user_agent.strip())
     checks.append(("SEC User-Agent", sec_ua_ok, settings.sec_user_agent[:50] if sec_ua_ok else "MISSING"))
+    checks.append(
+        (
+            "Market Data Mode",
+            settings.market_data_mode == "research_only",
+            settings.market_data_mode,
+        )
+    )
+    checks.append(
+        (
+            "IBKR Research Profile",
+            settings.ibkr_enabled,
+            f"{settings.ibkr_host}:{settings.ibkr_port} | client {settings.ibkr_client_id} | read_only={settings.ibkr_read_only}",
+        )
+    )
 
     # Database
     try:
@@ -513,7 +536,7 @@ def normalize(
 
         with session_scope() as session:
             # Find company
-            company = session.query(Company).filter(Company.ticker == ticker.upper()).first()
+            company = _lookup_company_by_ticker(session, ticker)
             if not company:
                 console.print(f"[red]Company not found: {ticker}[/red]")
                 raise typer.Exit(1)
@@ -745,7 +768,7 @@ def canonical_facts(
 
         with session_scope() as session:
             # Find company
-            company = session.query(Company).filter(Company.ticker == ticker.upper()).first()
+            company = _lookup_company_by_ticker(session, ticker)
             if not company:
                 console.print(f"[red]Company not found: {ticker}[/red]")
                 raise typer.Exit(1)

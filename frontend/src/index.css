@@ -1,0 +1,263 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=Courier+Prime:wght@400;700&display=swap");
+
+:root {
+  color-scheme: dark;
+  font-family: "JetBrains Mono", "Courier Prime", monospace;
+  background: #06060a;
+  color: #e5e7eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top left, rgba(200, 168, 75, 0.08), transparent 24%),
+    radial-gradient(circle at bottom right, rgba(94, 234, 212, 0.08), transparent 22%),
+    #06060a;
+}
+
+body {
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+input::placeholder {
+  color: #4b5563;
+}
+
+input:focus {
+  outline: none;
+}
+
+.scanline-overlay,
+.crt-vignette,
+.crt-grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+.scanline-overlay {
+  background:
+    linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.025) 0%,
+      rgba(255, 255, 255, 0.008) 50%,
+      rgba(0, 0, 0, 0.07) 51%,
+      rgba(0, 0, 0, 0.13) 100%
+    );
+  background-size: 100% 4px;
+  opacity: 0.18;
+  mix-blend-mode: screen;
+}
+
+.crt-vignette {
+  background: radial-gradient(circle, transparent 52%, rgba(0, 0, 0, 0.52) 100%);
+}
+
+.crt-grain {
+  opacity: 0.06;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 3px 3px, 5px 5px;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
+
+.dot-green {
+  background: #4ade80;
+  box-shadow: 0 0 10px rgba(74, 222, 128, 0.55);
+}
+
+.dot-amber {
+  background: #c8a84b;
+  box-shadow: 0 0 10px rgba(200, 168, 75, 0.55);
+}
+
+.dot-teal {
+  background: #5eead4;
+  box-shadow: 0 0 10px rgba(94, 234, 212, 0.55);
+}
+
+.pulse-dot {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+.blink {
+  animation: blink 1s steps(2, start) infinite;
+}
+
+.fade-in {
+  animation: fade-in 220ms ease;
+}
+
+.fade-in-2 {
+  animation-duration: 320ms;
+}
+
+.glow-amber {
+  text-shadow: 0 0 14px rgba(200, 168, 75, 0.26);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.corner-brackets::before,
+.corner-brackets::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-color: rgba(200, 168, 75, 0.5);
+}
+
+.corner-brackets::before {
+  top: 6px;
+  left: 6px;
+  border-top: 1px solid;
+  border-left: 1px solid;
+}
+
+.corner-brackets::after {
+  right: 6px;
+  bottom: 6px;
+  border-right: 1px solid;
+  border-bottom: 1px solid;
+}
+
+.row-hover {
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.row-hover:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ticker-wrap {
+  position: sticky;
+  bottom: 0;
+  overflow: hidden;
+  border-top: 0.5px solid rgba(255, 255, 255, 0.06);
+  background: rgba(5, 5, 9, 0.94);
+}
+
+.ticker-wrap-top {
+  position: relative;
+  bottom: auto;
+  border-top: 0;
+  border-bottom: 0.5px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(90deg, rgba(94, 234, 212, 0.08) 0%, rgba(200, 168, 75, 0.06) 100%),
+    rgba(5, 5, 9, 0.97);
+}
+
+.ticker-track {
+  display: inline-flex;
+  min-width: 200%;
+  animation: ticker-scroll 42s linear infinite;
+}
+
+.ticker-track-fast {
+  animation-duration: 30s;
+}
+
+.ticker-item {
+  padding: 10px 18px;
+  white-space: nowrap;
+  color: #9ca3af;
+  letter-spacing: 0.08em;
+  font-size: 10px;
+}
+
+.ticker-item-filing {
+  color: #d1d5db;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@media (max-width: 1100px) {
+  body {
+    overflow: auto;
+  }
+
+  #root > div[style*="gridTemplateColumns: 240px 1fr"] {
+    grid-template-columns: 1fr !important;
+    height: auto !important;
+  }
+}

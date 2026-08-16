@@ -79,7 +79,7 @@ class MarketDataInterface:
     CRITICAL: This is research-only access.
     - NO real-time data (no trading decisions)
     - NO order placement
-    - NO broker connectivity
+    - Broker connectivity, if added, must remain research-only
     - Data sourced from public feeds (Yahoo Finance, SEC filings, etc.)
     """
 

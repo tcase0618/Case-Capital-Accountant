@@ -69,9 +69,7 @@ class CompanyFactsClient:
             Dict mapping taxonomy → concept → facts list
         """
         cik = self.sec_client.normalize_cik(cik)
-        cik_no_zeros = self.sec_client.cik_without_leading_zeros(cik)
-
-        url = f"{self.settings.sec_base_data}/api/xbrl/companyfacts/CIK{cik_no_zeros}.json"
+        url = f"{self.settings.sec_base_data}/api/xbrl/companyfacts/CIK{cik}.json"
         facts_data = self.sec_client._get_json(url)
 
         return facts_data
@@ -90,11 +88,9 @@ class CompanyFactsClient:
             Dict with concept metadata and units/values
         """
         cik = self.sec_client.normalize_cik(cik)
-        cik_no_zeros = self.sec_client.cik_without_leading_zeros(cik)
-
         url = (
             f"{self.settings.sec_base_data}/api/xbrl/"
-            f"companyconcept/CIK{cik_no_zeros}/{taxonomy}/{concept}.json"
+            f"companyconcept/CIK{cik}/{taxonomy}/{concept}.json"
         )
         concept_data = self.sec_client._get_json(url)
 

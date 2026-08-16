@@ -52,6 +52,20 @@ uv run alembic upgrade head
 uv run accountant doctor
 ```
 
+## Local app boot
+
+For a reliable local-first launch on Windows, use the bundled startup script. It builds the frontend if needed, forces a local SQLite database for the app process, starts the backend on `http://127.0.0.1:8010`, and serves the built frontend from the same port.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-accountant.ps1
+```
+
+Stop it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\stop-accountant.ps1
+```
+
 ## CLI
 
 ### Core Commands
@@ -127,8 +141,18 @@ See `.env.example`. Required for live SEC calls:
 | `ACCOUNTANT_ENV` | `development` / `production` |
 | `LOG_LEVEL` | `INFO`, `DEBUG`, … |
 | `DATA_DIR` | Raw files, DuckDB, Parquet |
+| `MARKET_DATA_MODE` | Keep as `research_only` |
+| `IBKR_ENABLED` | Enable IBKR research profile |
+| `IBKR_HOST` / `IBKR_PORT` | TWS or IB Gateway host/port |
+| `IBKR_CLIENT_ID` | Read-only client id for IBKR session |
+| `IBKR_READ_ONLY` | Should remain `true` |
+| `IBKR_ACCOUNT_ID` | Optional account identifier |
 
 There are no LLM API key fields. Do not add any.
+
+Notes:
+- `SEC_USER_AGENT` is not an API key. It is just an identifying string required by the SEC, for example `Case Capital Accountant you@example.com`.
+- IBKR in this repo is treated as a research-only connectivity profile, not an order-routing path.
 
 ## Linux VPS notes
 

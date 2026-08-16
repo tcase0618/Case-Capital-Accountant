@@ -84,12 +84,14 @@ class ArelleFacade:
     def _get_controller(self) -> Cntlr.Cntlr:
         """Lazy-initialize Arelle controller."""
         if self.cntlr is None:
-            self.cntlr = Cntlr.Cntlr(logHandler=self._log_handler)
+            self.cntlr = Cntlr.Cntlr()
         return self.cntlr
 
-    def _log_handler(self, message: str, level: int, *args) -> None:
-        """Handle Arelle logging output."""
-        pass
+    def _reset_controller(self, cntlr: Cntlr.Cntlr) -> None:
+        """Reset controller state when supported by the installed Arelle build."""
+        reset = getattr(cntlr, "reset", None)
+        if callable(reset):
+            reset()
 
     def validate_instance(
         self, instance_url: str, plugins: list[str] | None = None
@@ -119,7 +121,7 @@ class ArelleFacade:
 
         try:
             # Clear prior validation results
-            cntlr.reset()
+            self._reset_controller(cntlr)
 
             # Load instance
             modelXbrl = cntlr.modelManager.load(instance_url)
@@ -226,7 +228,7 @@ class ArelleFacade:
         facts: list[XbrlFact] = []
 
         try:
-            cntlr.reset()
+            self._reset_controller(cntlr)
             modelXbrl = cntlr.modelManager.load(instance_url)
 
             if modelXbrl is None:

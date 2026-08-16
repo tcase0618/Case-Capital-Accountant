@@ -31,6 +31,14 @@ class FilingIngestResult:
         return self.inserted + self.skipped
 
 
+@dataclass(frozen=True)
+class FilingFetchPayload:
+    resolution_ticker: str
+    resolution_name: str
+    submissions: dict[str, Any]
+    historical_shards: list[dict[str, Any]]
+
+
 def ingest_company_filings(
     session: Session,
     client: SecClient,
@@ -39,30 +47,73 @@ def ingest_company_filings(
     include_historical_files: bool = True,
 ) -> FilingIngestResult:
     """Fetch SEC company submissions and persist filing metadata idempotently."""
+    payload = fetch_company_filings_payload(
+        client,
+        ticker,
+        include_historical_files=include_historical_files,
+    )
+    return ingest_company_filings_payload(session, payload)
+
+
+def fetch_company_filings_payload(
+    client: SecClient,
+    ticker: str,
+    *,
+    include_historical_files: bool = True,
+) -> FilingFetchPayload:
+    """Fetch SEC submissions and historical shards without touching the database."""
     resolution = client.resolve_ticker(ticker)
     submissions = client.get_submissions(resolution.cik)
-    company = upsert_company_and_securities(
-        session,
-        submissions,
-        fallback_ticker=resolution.ticker,
-        fallback_name=resolution.name,
-    )
-
-    result = FilingIngestResult(
-        cik=company.cik,
-        ticker=resolution.ticker,
-        company_name=company.name,
-    )
-    _ingest_recent_block(session, client, company, submissions.get("filings", {}).get("recent"), result)
-
+    historical_shards: list[dict[str, Any]] = []
     if include_historical_files:
         files = submissions.get("filings", {}).get("files") or []
         for entry in files:
             name = entry.get("name") if isinstance(entry, dict) else None
             if not name:
                 continue
-            shard = client.get_submissions_file(str(name))
-            _ingest_recent_block(session, client, company, shard, result)
+            historical_shards.append(client.get_submissions_file(str(name)))
+    return FilingFetchPayload(
+        resolution_ticker=resolution.ticker,
+        resolution_name=resolution.name,
+        submissions=submissions,
+        historical_shards=historical_shards,
+    )
+
+
+def ingest_company_filings_payload(
+    session: Session,
+    payload: FilingFetchPayload,
+) -> FilingIngestResult:
+    """Persist an already-fetched submissions payload."""
+    company = upsert_company_and_securities(
+        session,
+        payload.submissions,
+        fallback_ticker=payload.resolution_ticker,
+        fallback_name=payload.resolution_name,
+    )
+
+    result = FilingIngestResult(
+        cik=company.cik,
+        ticker=payload.resolution_ticker,
+        company_name=company.name,
+    )
+    _ingest_recent_block(
+        session,
+        None,
+        company,
+        payload.submissions.get("filings", {}).get("recent"),
+        result,
+        source_url_builder=_archive_document_url_builder(company.cik),
+    )
+    for shard in payload.historical_shards:
+        _ingest_recent_block(
+            session,
+            None,
+            company,
+            shard,
+            result,
+            source_url_builder=_archive_document_url_builder(company.cik),
+        )
 
     session.flush()
     log.info(
@@ -225,10 +276,25 @@ def _optional_bool(value: Any) -> bool | None:
     return None
 
 
+def _archive_document_url_builder(cik: str):
+    cik_nolead = str(int(normalize_cik(cik)))
+
+    def _build(_company_cik: str, accession_number: str, document: str | None) -> str | None:
+        if not document:
+            return None
+        accession_nodash = accession_number.replace("-", "")
+        return f"https://www.sec.gov/Archives/edgar/data/{cik_nolead}/{accession_nodash}/{document}"
+
+    return _build
+
+
 # Re-export for tests that construct companies from submissions without a client.
 __all__ = [
     "FilingIngestResult",
+    "FilingFetchPayload",
+    "fetch_company_filings_payload",
     "ingest_company_filings",
+    "ingest_company_filings_payload",
     "ingest_filings_from_submissions",
     "latest_filing_for_ticker",
     "normalize_cik",
