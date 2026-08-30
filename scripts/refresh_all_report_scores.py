@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import threading
+from collections import deque
 from datetime import UTC, date, datetime
 
 from sqlalchemy import func, select
@@ -10,6 +13,7 @@ from accountant.research.report_machine import MACHINE
 
 
 def main() -> None:
+    args = _parse_args()
     engine = create_db_engine()
     factory = create_session_factory(engine)
     today = date.today().isoformat()
@@ -43,35 +47,64 @@ def main() -> None:
 
     print(
         f"[{datetime.now(UTC).isoformat()}] starting resumable report refresh "
-        f"remaining={len(rows)} total_reports={total_reports}",
+        f"remaining={len(rows)} total_reports={total_reports} workers={args.workers}",
         flush=True,
     )
 
     processed = 0
     errors = 0
-    for index, (company_id, ticker) in enumerate(rows, start=1):
-        session = factory()
-        try:
-            company = session.get(Company, company_id)
-            if company is None:
-                errors += 1
-                print(f"[{index}/{len(rows)}] missing company ticker={ticker}", flush=True)
-                continue
-            with sqlite_write_guard():
-                MACHINE._build_report(session, company, ticker)
-                session.commit()
-            processed += 1
-            if index % 25 == 0 or index == len(rows):
+    queue = deque(rows)
+    queue_lock = threading.Lock()
+    counter_lock = threading.Lock()
+
+    def _worker(worker_id: int) -> None:
+        nonlocal processed, errors
+        while True:
+            with queue_lock:
+                if not queue:
+                    return
+                company_id, ticker = queue.popleft()
+            session = factory()
+            try:
+                company = session.get(Company, company_id)
+                if company is None:
+                    with counter_lock:
+                        errors += 1
+                    print(f"missing company ticker={ticker} worker={worker_id}", flush=True)
+                    continue
+                with sqlite_write_guard():
+                    MACHINE._build_report(session, company, ticker)
+                    session.commit()
+                with counter_lock:
+                    processed += 1
+                    current_processed = processed
+                    current_errors = errors
+                if current_processed % 25 == 0 or current_processed == len(rows):
+                    print(
+                        f"[{current_processed}/{len(rows)}] refreshed={current_processed} errors={current_errors} last={ticker} worker={worker_id}",
+                        flush=True,
+                    )
+            except Exception as exc:
+                session.rollback()
+                with counter_lock:
+                    errors += 1
+                    current_processed = processed
+                    current_errors = errors
                 print(
-                    f"[{index}/{len(rows)}] refreshed={processed} errors={errors} last={ticker}",
+                    f"[{current_processed}/{len(rows)}] error ticker={ticker} worker={worker_id} message={str(exc)[:300]} errors={current_errors}",
                     flush=True,
                 )
-        except Exception as exc:
-            session.rollback()
-            errors += 1
-            print(f"[{index}/{len(rows)}] error ticker={ticker} message={str(exc)[:300]}", flush=True)
-        finally:
-            session.close()
+            finally:
+                session.close()
+
+    threads = [
+        threading.Thread(target=_worker, args=(index + 1,), daemon=True, name=f"refresh-report-worker-{index + 1}")
+        for index in range(max(1, args.workers))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
     ended = datetime.now(UTC)
     duration = (ended - started).total_seconds()
@@ -81,6 +114,12 @@ def main() -> None:
         flush=True,
     )
     engine.dispose()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Refresh existing company reports in parallel.")
+    parser.add_argument("--workers", type=int, default=3, help="Worker count for report refresh.")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":

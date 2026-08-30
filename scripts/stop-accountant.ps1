@@ -20,4 +20,9 @@ if ($listener) {
     Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
 }
 
+$portableStopScript = Join-Path $repoRoot "scripts\stop-portable-postgres.ps1"
+if (Test-Path $portableStopScript) {
+    & $portableStopScript | Out-Null
+}
+
 Write-Host "Accountant stopped."

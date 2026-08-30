@@ -7,6 +7,20 @@ from pathlib import Path
 import uvicorn
 
 
+def load_dotenv_file(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, value = line.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        os.environ.setdefault(name, value.strip())
+
+
 def seed_local_demo_data() -> None:
     from sqlalchemy import select
 
@@ -170,9 +184,11 @@ def main() -> None:
     os.chdir(repo_root)
     data_dir = repo_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
+    load_dotenv_file(repo_root / ".env")
+    load_dotenv_file(Path(r"C:\Case Capital\stock-intel\backend\.env"))
 
-    sqlite_url = f"sqlite:///{(data_dir / 'accountant.db').resolve().as_posix()}"
-    os.environ["DATABASE_URL"] = sqlite_url
+    default_url = "postgresql+psycopg://accountant:accountant@127.0.0.1:5432/accountant"
+    os.environ.setdefault("DATABASE_URL", default_url)
     os.environ["ACCOUNTANT_ENV"] = "development"
     os.environ["DATA_DIR"] = str(data_dir)
     os.environ.setdefault("LOG_LEVEL", "INFO")
@@ -191,6 +207,7 @@ def main() -> None:
         FilingDocument,
         FinancialPeriod,
         RawFact,
+        ReportCard,
         ResearchRecord,
         Security,
         StatementLine,
@@ -200,7 +217,8 @@ def main() -> None:
     engine = create_db_engine(os.environ["DATABASE_URL"])
     Base.metadata.create_all(bind=engine)
     engine.dispose()
-    seed_local_demo_data()
+    if os.environ.get("ACCOUNTANT_DEMO_SEED") == "1":
+        seed_local_demo_data()
 
     uvicorn.run(
         "accountant.api.app:app",

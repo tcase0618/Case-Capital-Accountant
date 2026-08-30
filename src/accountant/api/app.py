@@ -12,11 +12,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session, selectinload
 
 from accountant.analysis.point_in_time_engine import PointInTimeResolver
 from accountant.api.schemas import (
+    AccountantIntegrationStatusResponse,
+    AccountantIntegrationTickerResponse,
     ActionResultResponse,
     AvailableStatementResponse,
     BuyBoardCandidateResponse,
@@ -87,6 +89,8 @@ ibkr_quote = alpaca_quote
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DASHBOARD_FACT_CACHE_PATH = _REPO_ROOT / ".run" / "dashboard_fact_totals.json"
+_DASHBOARD_METRICS_CACHE_PATH = _REPO_ROOT / ".run" / "dashboard_metrics.json"
+_COMPANIES_CACHE_PATH = _REPO_ROOT / ".run" / "companies_cache.json"
 _DASHBOARD_FACT_CACHE_LOCK = threading.Lock()
 _DASHBOARD_FACT_CACHE: dict[str, int | str | bool | None] = {
     "total_raw_facts": 0,
@@ -94,6 +98,32 @@ _DASHBOARD_FACT_CACHE: dict[str, int | str | bool | None] = {
     "updated_at": None,
     "refresh_running": False,
 }
+_DASHBOARD_METRICS_CACHE_LOCK = threading.Lock()
+_DASHBOARD_METRICS_CACHE: dict[str, int | str | bool | None] = {
+    "total_companies": 0,
+    "total_filings": 0,
+    "total_raw_facts": 0,
+    "total_canonical_facts": 0,
+    "total_statement_snapshots": 0,
+    "total_research_records": 0,
+    "companies_with_filings": 0,
+    "companies_with_raw_facts": 0,
+    "companies_with_canonical_facts": 0,
+    "companies_with_statement_snapshots": 0,
+    "companies_with_research_records": 0,
+    "companies_with_reports": 0,
+    "updated_at": None,
+    "refresh_running": False,
+}
+_COMPANIES_CACHE_LOCK = threading.Lock()
+_COMPANIES_CACHE: dict[str, Any] = {
+    "items": [],
+    "updated_at": None,
+    "refresh_running": False,
+}
+
+_API_ENGINE = create_db_engine()
+_API_SESSION_FACTORY = create_session_factory(_API_ENGINE)
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,6 +173,51 @@ def _write_dashboard_fact_cache(payload: dict[str, int | str | None]) -> None:
     temp_path.replace(_DASHBOARD_FACT_CACHE_PATH)
 
 
+def _load_dashboard_metrics_cache() -> None:
+    if not _DASHBOARD_METRICS_CACHE_PATH.exists():
+        return
+    try:
+        payload = json.loads(_DASHBOARD_METRICS_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    with _DASHBOARD_METRICS_CACHE_LOCK:
+        for key in _DASHBOARD_METRICS_CACHE:
+            if key == "refresh_running":
+                continue
+            if key == "updated_at":
+                _DASHBOARD_METRICS_CACHE[key] = payload.get(key)
+            else:
+                _DASHBOARD_METRICS_CACHE[key] = int(payload.get(key, 0) or 0)
+        _DASHBOARD_METRICS_CACHE["refresh_running"] = False
+
+
+def _write_dashboard_metrics_cache(payload: dict[str, int | str | None]) -> None:
+    _DASHBOARD_METRICS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _DASHBOARD_METRICS_CACHE_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(payload), encoding="utf-8")
+    temp_path.replace(_DASHBOARD_METRICS_CACHE_PATH)
+
+
+def _load_companies_cache() -> None:
+    if not _COMPANIES_CACHE_PATH.exists():
+        return
+    try:
+        payload = json.loads(_COMPANIES_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    with _COMPANIES_CACHE_LOCK:
+        _COMPANIES_CACHE["items"] = payload.get("items", [])
+        _COMPANIES_CACHE["updated_at"] = payload.get("updated_at")
+        _COMPANIES_CACHE["refresh_running"] = False
+
+
+def _write_companies_cache(payload: dict[str, Any]) -> None:
+    _COMPANIES_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _COMPANIES_CACHE_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(payload), encoding="utf-8")
+    temp_path.replace(_COMPANIES_CACHE_PATH)
+
+
 def _sqlite_path_from_url(database_url: str) -> Path | None:
     prefix = "sqlite:///"
     if not database_url.startswith(prefix):
@@ -162,6 +237,10 @@ def _should_use_background_fact_totals(database_url: str) -> bool:
         return sqlite_path.stat().st_size >= 1_000_000_000
     except OSError:
         return False
+
+
+def _should_use_background_dashboard_metrics(database_url: str) -> bool:
+    return database_url.startswith("postgresql") or _should_use_background_fact_totals(database_url)
 
 
 def _refresh_dashboard_fact_totals() -> None:
@@ -215,22 +294,262 @@ def _ensure_dashboard_fact_totals_refresh() -> dict[str, int | str | bool | None
         return dict(_DASHBOARD_FACT_CACHE)
 
 
+def _postgres_approximate_table_count(session: Session, table_name: str) -> int:
+    value = session.execute(
+        text(
+            """
+            select greatest(
+                coalesce(s.n_live_tup::bigint, 0),
+                coalesce(c.reltuples::bigint, 0)
+            )
+            from pg_stat_user_tables s
+            join pg_class c on c.oid = s.relid
+            where s.relname = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).scalar_one_or_none()
+    return int(value or 0)
+
+
+def _refresh_dashboard_metrics() -> None:
+    session = _API_SESSION_FACTORY()
+    try:
+        bind = session.get_bind()
+        database_url = str(bind.url)
+        if database_url.startswith("postgresql"):
+            payload: dict[str, int | str | None] = {
+                "total_companies": int(session.execute(select(func.count()).select_from(Company)).scalar_one()),
+                "total_filings": int(session.execute(select(func.count()).select_from(Filing)).scalar_one()),
+                "total_raw_facts": _postgres_approximate_table_count(session, RawFact.__tablename__),
+                "total_canonical_facts": _postgres_approximate_table_count(session, CanonicalFact.__tablename__),
+                "total_statement_snapshots": int(session.execute(select(func.count()).select_from(StatementSnapshot)).scalar_one()),
+                "total_research_records": int(session.execute(select(func.count()).select_from(ResearchRecord)).scalar_one()),
+                "companies_with_filings": int(session.execute(select(func.count(func.distinct(Filing.company_id)))).scalar_one()),
+                "companies_with_raw_facts": int(session.execute(select(func.count(func.distinct(RawFact.company_id)))).scalar_one()),
+                "companies_with_canonical_facts": int(session.execute(select(func.count(func.distinct(CanonicalFact.company_id)))).scalar_one()),
+                "companies_with_statement_snapshots": int(session.execute(select(func.count(func.distinct(StatementSnapshot.company_id)))).scalar_one()),
+                "companies_with_research_records": int(session.execute(select(func.count(func.distinct(ResearchRecord.company_id)))).scalar_one()),
+                "companies_with_reports": int(session.execute(select(func.count(func.distinct(CompanyReport.company_id)))).scalar_one()),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        else:
+            payload = {
+                "total_companies": int(session.execute(select(func.count()).select_from(Company)).scalar_one()),
+                "total_filings": int(session.execute(select(func.count()).select_from(Filing)).scalar_one()),
+                "total_raw_facts": int(session.execute(select(func.count()).select_from(RawFact)).scalar_one()),
+                "total_canonical_facts": int(session.execute(select(func.count()).select_from(CanonicalFact)).scalar_one()),
+                "total_statement_snapshots": int(session.execute(select(func.count()).select_from(StatementSnapshot)).scalar_one()),
+                "total_research_records": int(session.execute(select(func.count()).select_from(ResearchRecord)).scalar_one()),
+                "companies_with_filings": _exists_company_count(session, Filing),
+                "companies_with_raw_facts": _exists_company_count(session, RawFact),
+                "companies_with_canonical_facts": _exists_company_count(session, CanonicalFact),
+                "companies_with_statement_snapshots": _exists_company_count(session, StatementSnapshot),
+                "companies_with_research_records": _exists_company_count(session, ResearchRecord),
+                "companies_with_reports": _exists_company_count(session, CompanyReport),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        with _DASHBOARD_METRICS_CACHE_LOCK:
+            _DASHBOARD_METRICS_CACHE.update(payload)
+            _DASHBOARD_METRICS_CACHE["refresh_running"] = False
+        _write_dashboard_metrics_cache(payload)
+    except Exception:
+        with _DASHBOARD_METRICS_CACHE_LOCK:
+            _DASHBOARD_METRICS_CACHE["refresh_running"] = False
+    finally:
+        session.close()
+
+
+def _ensure_dashboard_metrics_refresh() -> dict[str, int | str | bool | None]:
+    settings = get_settings()
+    with _DASHBOARD_METRICS_CACHE_LOCK:
+        updated_at = str(_DASHBOARD_METRICS_CACHE.get("updated_at") or "")
+        is_stale = True
+        if updated_at:
+            try:
+                is_stale = (datetime.utcnow() - datetime.fromisoformat(updated_at)).total_seconds() >= 90
+            except ValueError:
+                is_stale = True
+        has_incomplete_zero_totals = (
+            int(_DASHBOARD_METRICS_CACHE.get("companies_with_filings") or 0) > 0
+            and int(_DASHBOARD_METRICS_CACHE.get("total_filings") or 0) == 0
+        ) or (
+            int(_DASHBOARD_METRICS_CACHE.get("companies_with_raw_facts") or 0) > 0
+            and int(_DASHBOARD_METRICS_CACHE.get("total_raw_facts") or 0) == 0
+        ) or (
+            int(_DASHBOARD_METRICS_CACHE.get("companies_with_canonical_facts") or 0) > 0
+            and int(_DASHBOARD_METRICS_CACHE.get("total_canonical_facts") or 0) == 0
+        )
+        should_start = (
+            _should_use_background_dashboard_metrics(settings.database_url)
+            and not bool(_DASHBOARD_METRICS_CACHE.get("refresh_running"))
+            and (not updated_at or is_stale or has_incomplete_zero_totals)
+        )
+        if should_start:
+            _DASHBOARD_METRICS_CACHE["refresh_running"] = True
+            thread = threading.Thread(
+                target=_refresh_dashboard_metrics,
+                name="dashboard-metrics",
+                daemon=True,
+            )
+            thread.start()
+        return dict(_DASHBOARD_METRICS_CACHE)
+
+
+def _refresh_companies_cache() -> None:
+    session = _API_SESSION_FACTORY()
+    try:
+        rows = session.execute(
+            select(Company, Security.ticker)
+            .join(Security, Security.company_id == Company.id)
+            .order_by(Security.ticker.asc())
+            .limit(200)
+        ).all()
+        items = [
+            item.model_dump(mode="json")
+            for item in _build_company_list_items(session, rows)
+        ]
+        payload = {
+            "items": items,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        with _COMPANIES_CACHE_LOCK:
+            _COMPANIES_CACHE.update(payload)
+            _COMPANIES_CACHE["refresh_running"] = False
+        _write_companies_cache(payload)
+    except Exception:
+        with _COMPANIES_CACHE_LOCK:
+            _COMPANIES_CACHE["refresh_running"] = False
+    finally:
+        session.close()
+
+
+def _ensure_companies_cache_refresh() -> dict[str, Any]:
+    with _COMPANIES_CACHE_LOCK:
+        updated_at = str(_COMPANIES_CACHE.get("updated_at") or "")
+        is_stale = True
+        if updated_at:
+            try:
+                is_stale = (datetime.utcnow() - datetime.fromisoformat(updated_at)).total_seconds() >= 90
+            except ValueError:
+                is_stale = True
+        should_start = (
+            not bool(_COMPANIES_CACHE.get("refresh_running"))
+            and (not updated_at or is_stale)
+        )
+        if should_start:
+            _COMPANIES_CACHE["refresh_running"] = True
+            thread = threading.Thread(
+                target=_refresh_companies_cache,
+                name="companies-cache",
+                daemon=True,
+            )
+            thread.start()
+        return dict(_COMPANIES_CACHE)
+
+
+def _company_metric_counts(session: Session, model: Any, company_ids: list[Any]) -> dict[Any, int]:
+    if not company_ids:
+        return {}
+    stmt = (
+        select(model.company_id, func.count())
+        .where(model.company_id.in_(company_ids))
+        .group_by(model.company_id)
+    )
+    return {company_id: int(count or 0) for company_id, count in session.execute(stmt).all()}
+
+
+def _company_latest_filing_dates(session: Session, company_ids: list[Any]) -> dict[Any, Any]:
+    if not company_ids:
+        return {}
+    stmt = (
+        select(Filing.company_id, func.max(Filing.filing_date))
+        .where(Filing.company_id.in_(company_ids))
+        .group_by(Filing.company_id)
+    )
+    return {company_id: filing_date for company_id, filing_date in session.execute(stmt).all()}
+
+
+def _build_company_list_items(
+    session: Session,
+    rows: list[tuple[Company, str]],
+) -> list[CompanyListItemResponse]:
+    company_ids = [company.id for company, _ticker in rows]
+    filings_counts = _company_metric_counts(session, Filing, company_ids)
+    raw_counts = _company_metric_counts(session, RawFact, company_ids)
+    canonical_counts = _company_metric_counts(session, CanonicalFact, company_ids)
+    statement_counts = _company_metric_counts(session, StatementSnapshot, company_ids)
+    research_counts = _company_metric_counts(session, ResearchRecord, company_ids)
+    latest_filing_dates = _company_latest_filing_dates(session, company_ids)
+
+    items: list[CompanyListItemResponse] = []
+    for company, ticker in rows:
+        filings_count = filings_counts.get(company.id, 0)
+        raw_facts_count = raw_counts.get(company.id, 0)
+        canonical_facts_count = canonical_counts.get(company.id, 0)
+        statement_snapshots_count = statement_counts.get(company.id, 0)
+        research_records_count = research_counts.get(company.id, 0)
+        items.append(
+            CompanyListItemResponse(
+                ticker=ticker,
+                cik=company.cik,
+                name=company.name,
+                filings_count=filings_count,
+                raw_facts_count=raw_facts_count,
+                canonical_facts_count=canonical_facts_count,
+                statement_snapshots_count=statement_snapshots_count,
+                research_records_count=research_records_count,
+                latest_filing_date=latest_filing_dates.get(company.id),
+                coverage_status=_coverage_status(
+                    raw_facts_count,
+                    canonical_facts_count,
+                    statement_snapshots_count,
+                ),
+            )
+        )
+    return items
+
+
+def _fast_dashboard_totals(session: Session) -> dict[str, int]:
+    bind = session.get_bind()
+    database_url = str(bind.url)
+    total_companies = int(session.execute(select(func.count()).select_from(Company)).scalar_one())
+    if database_url.startswith("postgresql"):
+        return {
+            "total_companies": total_companies,
+            "total_filings": _postgres_approximate_table_count(session, Filing.__tablename__),
+            "total_raw_facts": _postgres_approximate_table_count(session, RawFact.__tablename__),
+            "total_canonical_facts": _postgres_approximate_table_count(session, CanonicalFact.__tablename__),
+            "total_statement_snapshots": _postgres_approximate_table_count(session, StatementSnapshot.__tablename__),
+            "total_research_records": _postgres_approximate_table_count(session, ResearchRecord.__tablename__),
+        }
+    return {
+        "total_companies": total_companies,
+        "total_filings": int(session.execute(select(func.count()).select_from(Filing)).scalar_one()),
+        "total_raw_facts": int(session.execute(select(func.count()).select_from(RawFact)).scalar_one()),
+        "total_canonical_facts": int(session.execute(select(func.count()).select_from(CanonicalFact)).scalar_one()),
+        "total_statement_snapshots": int(session.execute(select(func.count()).select_from(StatementSnapshot)).scalar_one()),
+        "total_research_records": int(session.execute(select(func.count()).select_from(ResearchRecord)).scalar_one()),
+    }
+
+
 _load_dashboard_fact_cache()
+_load_dashboard_metrics_cache()
+_load_companies_cache()
 
 
 @app.on_event("startup")
 def startup_machine() -> None:
-    engine = create_db_engine()
-    Base.metadata.create_all(bind=engine)
-    factory = create_session_factory(engine)
-    session = factory()
+    Base.metadata.create_all(bind=_API_ENGINE)
+    session = _API_SESSION_FACTORY()
     try:
         ensure_canonical_taxonomy_seeded(session)
         session.commit()
     finally:
         session.close()
-        engine.dispose()
     _ensure_dashboard_fact_totals_refresh()
+    _ensure_dashboard_metrics_refresh()
+    _ensure_companies_cache_refresh()
     CACHE_WARMER.start()
     if get_settings().machine_enabled:
         MACHINE.start()
@@ -242,17 +561,15 @@ def shutdown_machine() -> None:
     MACHINE.stop()
     BUY_BOARD.stop()
     CACHE_WARMER.stop()
+    _API_ENGINE.dispose()
 
 
 def get_session() -> Iterator[Session]:
-    engine = create_db_engine()
-    factory = create_session_factory(engine)
-    session = factory()
+    session = _API_SESSION_FACTORY()
     try:
         yield session
     finally:
         session.close()
-        engine.dispose()
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -353,6 +670,16 @@ def _parse_ticker_blob(ticker_blob: str) -> list[str]:
     return [token.strip() for token in normalized.split(" ") if token.strip()]
 
 
+def _latest_report_for_company(session: Session, company_id: Any) -> CompanyReport | None:
+    stmt = (
+        select(CompanyReport)
+        .where(CompanyReport.company_id == company_id)
+        .order_by(CompanyReport.updated_at.desc(), CompanyReport.created_at.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -417,33 +744,40 @@ def api_get_company_facts(
 @app.get("/api/dashboard", response_model=DashboardResponse)
 def get_dashboard(session: SessionDep) -> DashboardResponse:
     bind = session.get_bind()
+    fast_totals = _fast_dashboard_totals(session)
     use_background_fact_totals = _should_use_background_fact_totals(str(bind.url))
-    fact_totals = _ensure_dashboard_fact_totals_refresh()
-    companies_with_raw_facts = _exists_company_count(session, RawFact)
-    companies_with_canonical_facts = _exists_company_count(session, CanonicalFact)
-    companies_with_statement_snapshots = _exists_company_count(session, StatementSnapshot)
-    companies_with_research_records = _exists_company_count(session, ResearchRecord)
-    companies_with_reports = _exists_company_count(session, CompanyReport)
+    metrics_cache = _ensure_dashboard_metrics_refresh()
+    fact_totals = _ensure_dashboard_fact_totals_refresh() if use_background_fact_totals else {}
+    use_background_metrics = _should_use_background_dashboard_metrics(str(bind.url))
     stats = DashboardStatsResponse(
-        total_companies=int(session.execute(select(func.count()).select_from(Company)).scalar_one()),
-        total_filings=int(session.execute(select(func.count()).select_from(Filing)).scalar_one()),
+        total_companies=int(metrics_cache.get("total_companies") or fast_totals["total_companies"]) if use_background_metrics else fast_totals["total_companies"],
+        total_filings=int(metrics_cache.get("total_filings") or fast_totals["total_filings"]) if use_background_metrics else fast_totals["total_filings"],
         total_raw_facts=(
             int(fact_totals.get("total_raw_facts") or 0)
             if use_background_fact_totals
-            else int(session.execute(select(func.count()).select_from(RawFact)).scalar_one())
+            else (
+                int(metrics_cache.get("total_raw_facts") or fast_totals["total_raw_facts"])
+                if use_background_metrics
+                else fast_totals["total_raw_facts"]
+            )
         ),
         total_canonical_facts=(
             int(fact_totals.get("total_canonical_facts") or 0)
             if use_background_fact_totals
-            else int(session.execute(select(func.count()).select_from(CanonicalFact)).scalar_one())
+            else (
+                int(metrics_cache.get("total_canonical_facts") or fast_totals["total_canonical_facts"])
+                if use_background_metrics
+                else fast_totals["total_canonical_facts"]
+            )
         ),
-        total_statement_snapshots=int(session.execute(select(func.count()).select_from(StatementSnapshot)).scalar_one()),
-        total_research_records=int(session.execute(select(func.count()).select_from(ResearchRecord)).scalar_one()),
-        companies_with_raw_facts=companies_with_raw_facts,
-        companies_with_canonical_facts=companies_with_canonical_facts,
-        companies_with_statement_snapshots=companies_with_statement_snapshots,
-        companies_with_research_records=companies_with_research_records,
-        companies_with_reports=companies_with_reports,
+        total_statement_snapshots=int(metrics_cache.get("total_statement_snapshots") or fast_totals["total_statement_snapshots"]) if use_background_metrics else fast_totals["total_statement_snapshots"],
+        total_research_records=int(metrics_cache.get("total_research_records") or fast_totals["total_research_records"]) if use_background_metrics else fast_totals["total_research_records"],
+        companies_with_filings=int(metrics_cache.get("companies_with_filings") or 0) if use_background_metrics else _exists_company_count(session, Filing),
+        companies_with_raw_facts=int(metrics_cache.get("companies_with_raw_facts") or 0) if use_background_metrics else _exists_company_count(session, RawFact),
+        companies_with_canonical_facts=int(metrics_cache.get("companies_with_canonical_facts") or 0) if use_background_metrics else _exists_company_count(session, CanonicalFact),
+        companies_with_statement_snapshots=int(metrics_cache.get("companies_with_statement_snapshots") or 0) if use_background_metrics else _exists_company_count(session, StatementSnapshot),
+        companies_with_research_records=int(metrics_cache.get("companies_with_research_records") or 0) if use_background_metrics else _exists_company_count(session, ResearchRecord),
+        companies_with_reports=int(metrics_cache.get("companies_with_reports") or 0) if use_background_metrics else _exists_company_count(session, CompanyReport),
     )
 
     companies = session.execute(
@@ -452,32 +786,7 @@ def get_dashboard(session: SessionDep) -> DashboardResponse:
         .order_by(Company.name.asc())
         .limit(12)
     ).all()
-
-    coverage = []
-    for company, ticker in companies:
-        filings_count = _count_for_company(session, Filing, company.id)
-        raw_facts_count = _count_for_company(session, RawFact, company.id)
-        canonical_facts_count = _count_for_company(session, CanonicalFact, company.id)
-        statement_snapshots_count = _count_for_company(session, StatementSnapshot, company.id)
-        research_records_count = _count_for_company(session, ResearchRecord, company.id)
-        coverage.append(
-            CompanyListItemResponse(
-                ticker=ticker,
-                cik=company.cik,
-                name=company.name,
-                filings_count=filings_count,
-                raw_facts_count=raw_facts_count,
-                canonical_facts_count=canonical_facts_count,
-                statement_snapshots_count=statement_snapshots_count,
-                research_records_count=research_records_count,
-                latest_filing_date=_latest_filing_date(session, company.id),
-                coverage_status=_coverage_status(
-                    raw_facts_count,
-                    canonical_facts_count,
-                    statement_snapshots_count,
-                ),
-            )
-        )
+    coverage = _build_company_list_items(session, companies)
 
     filings_stmt = (
         select(Filing, Company.name, Security.ticker)
@@ -525,38 +834,21 @@ def list_companies(
     q: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[CompanyListItemResponse]:
+    if not q:
+        cache = _ensure_companies_cache_refresh()
+        cached_items = cache.get("items") or []
+        if cached_items:
+            return [
+                CompanyListItemResponse.model_validate(item)
+                for item in cached_items[:limit]
+            ]
     stmt = select(Company, Security.ticker).join(Security, Security.company_id == Company.id)
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(Security.ticker.ilike(like), Company.name.ilike(like), Company.cik.ilike(like)))
     stmt = stmt.order_by(Security.ticker.asc()).limit(limit)
 
-    items = []
-    for company, ticker in session.execute(stmt).all():
-        filings_count = _count_for_company(session, Filing, company.id)
-        raw_facts_count = _count_for_company(session, RawFact, company.id)
-        canonical_facts_count = _count_for_company(session, CanonicalFact, company.id)
-        statement_snapshots_count = _count_for_company(session, StatementSnapshot, company.id)
-        research_records_count = _count_for_company(session, ResearchRecord, company.id)
-        items.append(
-            CompanyListItemResponse(
-                ticker=ticker,
-                cik=company.cik,
-                name=company.name,
-                filings_count=filings_count,
-                raw_facts_count=raw_facts_count,
-                canonical_facts_count=canonical_facts_count,
-                statement_snapshots_count=statement_snapshots_count,
-                research_records_count=research_records_count,
-                latest_filing_date=_latest_filing_date(session, company.id),
-                coverage_status=_coverage_status(
-                    raw_facts_count,
-                    canonical_facts_count,
-                    statement_snapshots_count,
-                ),
-            )
-        )
-    return items
+    return _build_company_list_items(session, session.execute(stmt).all())
 
 
 @app.get("/api/companies/{ticker}", response_model=CompanyResponse)
@@ -1026,7 +1318,10 @@ def _report_card_response(row: ReportCard) -> ReportCardResponse:
         accepted_at=row.accepted_at.isoformat() if row.accepted_at else None,
         accession_number=row.accession_number,
         source_url=row.source_url,
+        raw_filing_sha256=row.raw_filing_sha256,
         is_restatement=row.is_restatement,
+        restates_report_card_id=row.restates_report_card_id,
+        tag_map_version=row.tag_map_version,
         prior_report_card_id=row.prior_report_card_id,
         standardized_financials=row.standardized_financials,
         growth_trend_deltas=row.growth_trend_deltas,
@@ -1063,6 +1358,78 @@ def get_latest_report_card(session: SessionDep, ticker: str) -> ReportCardRespon
 @app.get("/api/reports/status", response_model=ReportMachineStatusResponse)
 def report_machine_status() -> ReportMachineStatusResponse:
     return ReportMachineStatusResponse(**MACHINE.snapshot())
+
+
+@app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse)
+def accountant_integration_status(session: SessionDep) -> AccountantIntegrationStatusResponse:
+    machine = MACHINE.snapshot()
+    metrics = _ensure_dashboard_metrics_refresh()
+    companies_with_report_cards = _exists_company_count(session, ReportCard)
+    ready = (
+        int(machine.get("runnable_companies") or 0) == 0
+        and int(machine.get("blocked_companies") or 0) == 0
+        and int(metrics.get("companies_with_reports") or 0) > 0
+        and companies_with_report_cards > 0
+    )
+    completion_state = (
+        "complete"
+        if ready
+        else ("blocked" if int(machine.get("blocked_companies") or 0) > 0 else "processing")
+    )
+    return AccountantIntegrationStatusResponse(
+        generated_at=datetime.utcnow().isoformat(),
+        ready_for_readonly_integration=ready,
+        completion_state=completion_state,
+        total_companies=int(machine.get("total_companies") or 0),
+        reports_cached=int(machine.get("reports_cached") or 0),
+        pending_companies=int(machine.get("pending_companies") or 0),
+        runnable_companies=int(machine.get("runnable_companies") or 0),
+        blocked_companies=int(machine.get("blocked_companies") or 0),
+        blocked_examples=list(machine.get("blocked_examples") or []),
+        latest_machine_action=machine.get("last_action"),
+        latest_machine_cycle_at=machine.get("last_cycle_at"),
+        companies_with_reports=int(metrics.get("companies_with_reports") or 0),
+        companies_with_report_cards=companies_with_report_cards,
+        companies_with_canonical_facts=int(metrics.get("companies_with_canonical_facts") or 0),
+        companies_with_statement_snapshots=int(metrics.get("companies_with_statement_snapshots") or 0),
+    )
+
+
+@app.get("/api/integration/accountant/{ticker}", response_model=AccountantIntegrationTickerResponse)
+def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> AccountantIntegrationTickerResponse:
+    company, resolved_ticker = _get_company_or_404(session, ticker)
+    report = _latest_report_for_company(session, company.id)
+    report_card = latest_report_card_for_ticker(session, resolved_ticker)
+    canonical_facts_count = _count_for_company(session, CanonicalFact, company.id)
+    statement_snapshots_count = _count_for_company(session, StatementSnapshot, company.id)
+    report_available = report is not None
+    report_card_available = report_card is not None
+    ready = (
+        report_available
+        and report_card_available
+        and report is not None
+        and report.pipeline_stage == "reports-ready"
+    )
+    future_bucket = None
+    if report is not None and isinstance(report.key_stats, dict):
+        future_bucket = report.key_stats.get("future_bucket")
+    return AccountantIntegrationTickerResponse(
+        generated_at=datetime.utcnow().isoformat(),
+        ticker=resolved_ticker,
+        company_name=company.name,
+        ready_for_readonly_integration=ready,
+        pipeline_stage=report.pipeline_stage if report is not None else "missing_report",
+        report_available=report_available,
+        report_card_available=report_card_available,
+        canonical_facts_count=canonical_facts_count,
+        statement_snapshots_count=statement_snapshots_count,
+        latest_report_date=report.as_of_date if report is not None else None,
+        latest_report_card_filed_date=report_card.filed_date.isoformat() if report_card is not None else None,
+        latest_report_updated_at=report.updated_at.isoformat() if report is not None and report.updated_at else None,
+        stance=report.stance if report is not None else None,
+        future_bucket=str(future_bucket) if future_bucket is not None else None,
+        data_quality_tier=report.data_quality_tier if report is not None else None,
+    )
 
 
 @app.post("/api/reports/run-once", response_model=ReportMachineStatusResponse)

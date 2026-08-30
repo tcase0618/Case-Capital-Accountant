@@ -251,7 +251,8 @@ def _build_why_buy(report: CompanyReport) -> list[str]:
     if growth is not None:
         reasons.append(f"Revenue growth screens at {growth:.1f}% on the latest accountant pass.")
     if owner_earnings is not None:
-        reasons.append(f"Owner earnings proxy remains positive at ${owner_earnings:,.0f}.")
+        owner_label = "positive" if owner_earnings >= 0 else "negative"
+        reasons.append(f"Owner earnings proxy is {owner_label} at ${owner_earnings:,.0f}.")
     if quality is not None:
         reasons.append(f"Accounting quality score holds at {quality:.1f}.")
     reasons.append(f"Canonical coverage now includes {canonical:,} mapped facts for comparability.")

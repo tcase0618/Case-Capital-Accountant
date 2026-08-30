@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -38,13 +39,30 @@ from accountant.research.buy_board import _estimate_share_count, sync_buy_board_
 from accountant.research.classification_engine import FundamentalResearchClassificationEngine
 from accountant.research.data_quality_engine import ResearchDataQualityEngine
 from accountant.research.factor_engine import build_accounting_factor_pack
+from accountant.research.filing_signal_engine import (
+    build_event_red_flags,
+    build_governance_signals,
+    build_non_gaap_signals,
+    build_textual_signals,
+)
 from accountant.research.grading_engine import GradingInputs, ReportCardGradingEngine
 from accountant.research.report_cards import persist_report_card
+from accountant.research.universe_signal_engine import membership_for_ticker
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
+from accountant.sec.exceptions import SecHttpError
 from accountant.universe import load_universe_tickers
 
 log = get_logger(__name__)
+
+_NON_OPERATING_NAME_MARKERS = (
+    "acquisition corp",
+    "acquisition corporation",
+    "acquisition co",
+    "acquisition company",
+    "blank check",
+    "spac",
+)
 
 
 @dataclass
@@ -59,6 +77,9 @@ class MachineSnapshot:
     processed_cycles: int = 0
     last_processed_ticker: str | None = None
     pending_companies: int = 0
+    runnable_companies: int = 0
+    blocked_companies: int = 0
+    blocked_examples: list[dict[str, str]] = field(default_factory=list)
     universe_counts: dict[str, int] = field(default_factory=dict)
     last_universe_sync_date: str | None = None
     worker_states: list[dict[str, str | int | None]] = field(default_factory=list)
@@ -110,6 +131,9 @@ class ContinuousResearchMachine:
                 "processed_cycles": self._snapshot.processed_cycles,
                 "last_processed_ticker": self._snapshot.last_processed_ticker,
                 "pending_companies": self._snapshot.pending_companies,
+                "runnable_companies": self._snapshot.runnable_companies,
+                "blocked_companies": self._snapshot.blocked_companies,
+                "blocked_examples": [dict(item) for item in self._snapshot.blocked_examples],
                 "universe_counts": dict(self._snapshot.universe_counts),
                 "last_universe_sync_date": self._snapshot.last_universe_sync_date,
                 "worker_states": [dict(item) for item in self._snapshot.worker_states],
@@ -190,7 +214,7 @@ class ContinuousResearchMachine:
             session = factory()
             try:
                 self._sync_universes_if_needed(session)
-                pending_count = self._refresh_progress_snapshot(session)
+                progress = self._refresh_progress_snapshot(session)
                 work_items = self._load_work_batch(session)
             finally:
                 session.close()
@@ -201,24 +225,27 @@ class ContinuousResearchMachine:
 
             summary_session = factory()
             try:
-                pending_count = self._refresh_progress_snapshot(summary_session)
+                progress = self._refresh_progress_snapshot(summary_session)
             finally:
                 summary_session.close()
 
             with self._lock:
                 self._snapshot.last_cycle_at = datetime.now(UTC).isoformat()
-                self._snapshot.pending_companies = pending_count
+                self._snapshot.pending_companies = progress["pending_companies"]
+                self._snapshot.runnable_companies = progress["runnable_companies"]
+                self._snapshot.blocked_companies = progress["blocked_companies"]
+                self._snapshot.blocked_examples = progress["blocked_examples"]
                 self._snapshot.processed_cycles += 1
                 if processed:
                     self._snapshot.last_processed_ticker = processed[-1]
                     self._snapshot.last_action = f"processed {', '.join(processed[:3])}" if len(processed) <= 3 else f"processed {len(processed)} companies"
-                elif pending_count == 0:
+                elif progress["runnable_companies"] == 0:
                     self._snapshot.last_action = "coverage queue drained"
                     self._snapshot.worker_states = self._blank_worker_states()
                 self._snapshot.last_error = None
         finally:
             engine.dispose()
-        return pending_count > 0
+        return progress["runnable_companies"] > 0
 
     def _sync_universes_if_needed(self, session: Session) -> None:
         settings = get_settings()
@@ -234,6 +261,13 @@ class ContinuousResearchMachine:
         for name, tickers in tickers_by_universe.items():
             counts[name] = len(tickers)
             merged.extend(tickers)
+        existing_companies = int(session.execute(select(func.count()).select_from(Company)).scalar_one())
+        if existing_companies > 0:
+            with self._lock:
+                self._snapshot.universe_counts = counts
+                self._snapshot.last_universe_sync_date = today
+                self._snapshot.last_action = f"reused universe registry ({existing_companies} companies)"
+            return
         with SecClient() as sec_client:
             import_companies_from_tickers(session, merged, sec_client)
         session.commit()
@@ -247,27 +281,41 @@ class ContinuousResearchMachine:
         batch_size = max(1, settings.machine_batch_size)
         worker_count = max(1, settings.machine_workers)
         limit = max(batch_size, worker_count)
+        oversample = max(limit * 12, 250)
 
         pending_stmt: Select[Any] = (
-            select(Company.id, Security.ticker)
+            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
             .join(Security, Security.company_id == Company.id)
             .outerjoin(CompanyReport, CompanyReport.company_id == Company.id)
             .where(CompanyReport.id.is_(None))
             .order_by(Security.ticker.asc())
-            .limit(limit)
+            .limit(oversample)
         )
-        pending_rows = [(company_id, ticker) for company_id, ticker in session.execute(pending_stmt).all()]
+        pending_rows = _filter_priority_rows(session.execute(pending_stmt).all(), limit=limit)
         if pending_rows:
             return pending_rows
 
-        refresh_stmt: Select[Any] = (
-            select(Company.id, Security.ticker)
+        deepening_stmt: Select[Any] = (
+            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
             .join(Security, Security.company_id == Company.id)
-            .outerjoin(CompanyReport, CompanyReport.company_id == Company.id)
+            .join(CompanyReport, CompanyReport.company_id == Company.id)
+            .where(CompanyReport.pipeline_stage.not_in(["reports-ready", "parked"]))
             .order_by(CompanyReport.updated_at.asc(), Security.ticker.asc())
-            .limit(worker_count)
+            .limit(max(worker_count * 12, 250))
         )
-        return [(company_id, ticker) for company_id, ticker in session.execute(refresh_stmt).all()]
+        deepening_rows = _filter_priority_rows(session.execute(deepening_stmt).all(), limit=worker_count)
+        if deepening_rows:
+            return deepening_rows
+
+        refresh_stmt: Select[Any] = (
+            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
+            .join(Security, Security.company_id == Company.id)
+            .join(CompanyReport, CompanyReport.company_id == Company.id)
+            .where(CompanyReport.pipeline_stage == "reports-ready")
+            .order_by(CompanyReport.updated_at.asc(), Security.ticker.asc())
+            .limit(max(worker_count * 12, 250))
+        )
+        return _filter_priority_rows(session.execute(refresh_stmt).all(), limit=worker_count)
 
     def _process_work_batch(
         self,
@@ -338,6 +386,13 @@ class ContinuousResearchMachine:
 
     def _process_company(self, session: Session, company: Company, ticker: str, worker_index: int) -> None:
         self._mark_progress(f"processing {ticker}")
+        companyfacts_terminal_404 = False
+        existing_report = session.execute(
+            select(CompanyReport).where(CompanyReport.company_id == company.id)
+        ).scalar_one_or_none()
+        if existing_report is not None and existing_report.pipeline_stage == "parked":
+            self._set_worker_state(worker_index, ticker=ticker, status="idle", last_action=f"parked {ticker}")
+            return
         with SecClient() as sec_client:
             filings_count = _count(session, Filing, company.id)
             if filings_count == 0:
@@ -363,6 +418,13 @@ class ContinuousResearchMachine:
                     facts_data = companyfacts_client.get_company_facts(company.cik)
                     with sqlite_write_guard():
                         ingest_company_facts_payload(session, company, facts_data)
+                except SecHttpError as exc:
+                    session.rollback()
+                    if exc.status_code == 404:
+                        companyfacts_terminal_404 = True
+                        log.info("machine.companyfacts_unavailable", ticker=ticker, cik=company.cik)
+                    else:
+                        log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
                 except TickerNotFoundError as exc:
                     session.rollback()
                     log.warning("machine.ticker_unresolved", ticker=ticker, error=_safe_error_text(exc))
@@ -374,6 +436,26 @@ class ContinuousResearchMachine:
                 if session.in_transaction():
                     with sqlite_write_guard():
                         session.commit()
+        filings_count = _count(session, Filing, company.id)
+        raw_facts_count = _count(session, RawFact, company.id)
+        report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
+        if filings_count > 0 and ((raw_facts_count > 0 and report is None) or companyfacts_terminal_404):
+            self._set_worker_state(worker_index, ticker=ticker, status="processing", last_action=f"seeding partial report {ticker}")
+            self._mark_progress(f"seeding partial report {ticker}")
+            try:
+                with sqlite_write_guard():
+                    self._build_partial_report(
+                        session,
+                        company,
+                        ticker,
+                        terminal_reason="companyfacts_404" if companyfacts_terminal_404 and raw_facts_count == 0 else None,
+                    )
+                    session.commit()
+            except Exception as exc:
+                session.rollback()
+                log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(exc)[:300])
+                return
+            return
         canonical_count = _count(session, CanonicalFact, company.id)
         if canonical_count == 0 and _count(session, RawFact, company.id) > 0:
             self._set_worker_state(worker_index, ticker=ticker, status="processing", last_action=f"canonicalizing {ticker}")
@@ -385,6 +467,23 @@ class ContinuousResearchMachine:
             except Exception as exc:
                 session.rollback()
                 log.warning("machine.normalize_skipped", ticker=ticker, error=str(exc)[:300])
+            canonical_count = _count(session, CanonicalFact, company.id)
+            if canonical_count == 0:
+                self._set_worker_state(worker_index, ticker=ticker, status="processing", last_action=f"parking {ticker}")
+                self._mark_progress(f"parking {ticker}")
+                try:
+                    with sqlite_write_guard():
+                        self._build_partial_report(
+                            session,
+                            company,
+                            ticker,
+                            terminal_reason="zero_canonical_after_normalize",
+                        )
+                        session.commit()
+                except Exception as exc:
+                    session.rollback()
+                    log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(exc)[:300])
+                return
         if _count(session, CanonicalFact, company.id) > 0:
             self._set_worker_state(worker_index, ticker=ticker, status="processing", last_action=f"building statements {ticker}")
             self._mark_progress(f"building statements {ticker}")
@@ -410,15 +509,81 @@ class ContinuousResearchMachine:
         report_count = int(session.execute(select(func.count()).select_from(CompanyReport)).scalar_one())
         return max(0, company_count - report_count)
 
-    def _refresh_progress_snapshot(self, session: Session) -> int:
+    def _refresh_progress_snapshot(self, session: Session) -> dict[str, Any]:
         company_count = int(session.execute(select(func.count()).select_from(Company)).scalar_one())
         report_count = int(session.execute(select(func.count()).select_from(CompanyReport)).scalar_one())
-        pending_count = max(0, company_count - report_count)
+        backlog = self._priority_backlog(session)
         with self._lock:
             self._snapshot.total_companies = company_count
             self._snapshot.reports_cached = report_count
-            self._snapshot.pending_companies = pending_count
-        return pending_count
+            self._snapshot.pending_companies = backlog["pending_companies"]
+            self._snapshot.runnable_companies = backlog["runnable_companies"]
+            self._snapshot.blocked_companies = backlog["blocked_companies"]
+            self._snapshot.blocked_examples = backlog["blocked_examples"]
+        return backlog
+
+    def _priority_backlog(self, session: Session) -> dict[str, Any]:
+        rows = session.execute(
+            select(
+                Company.id,
+                Security.ticker,
+                Company.name,
+                Company.entity_type,
+                Security.security_type,
+                CompanyReport.id,
+                CompanyReport.pipeline_stage,
+            )
+            .join(Security, Security.company_id == Company.id)
+            .outerjoin(CompanyReport, CompanyReport.company_id == Company.id)
+        ).all()
+        chosen_by_company: dict[Any, dict[str, Any]] = {}
+        for company_id, ticker, company_name, entity_type, security_type, report_id, pipeline_stage in rows:
+            if not _is_priority_operating_equity(
+                ticker=ticker,
+                company_name=company_name,
+                entity_type=entity_type,
+                security_type=security_type,
+            ):
+                continue
+            rank = _security_rank(ticker)
+            candidate = {
+                "company_id": company_id,
+                "ticker": ticker,
+                "report_id": report_id,
+                "pipeline_stage": pipeline_stage,
+                "rank": rank,
+            }
+            existing = chosen_by_company.get(company_id)
+            if existing is None or rank > existing["rank"]:
+                chosen_by_company[company_id] = candidate
+
+        runnable = 0
+        blocked = 0
+        blocked_examples: list[dict[str, str]] = []
+        for candidate in chosen_by_company.values():
+            reason = _backlog_reason(
+                report_id=candidate["report_id"],
+                pipeline_stage=candidate["pipeline_stage"],
+            )
+            if reason is None:
+                continue
+            if _is_runnable_backlog_reason(reason):
+                runnable += 1
+            else:
+                blocked += 1
+                if len(blocked_examples) < 10:
+                    blocked_examples.append(
+                        {
+                            "ticker": str(candidate["ticker"]),
+                            "reason": reason,
+                        }
+                    )
+        return {
+            "pending_companies": runnable + blocked,
+            "runnable_companies": runnable,
+            "blocked_companies": blocked,
+            "blocked_examples": blocked_examples,
+        }
 
     def _normalize_company(self, session: Session, company: Company) -> None:
         # Keep the unattended worker deterministic and fast. Validation remains
@@ -437,14 +602,16 @@ class ContinuousResearchMachine:
             )
         session.flush()
 
-    def _build_report(self, session: Session, company: Company, ticker: str) -> None:
-        facts = session.execute(
-            select(RawFact)
-            .where(RawFact.company_id == company.id)
-            .order_by(RawFact.period_end.desc(), RawFact.filed_date.desc(), RawFact.created_at.desc())
-        ).scalars().all()
+    def _build_partial_report(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        *,
+        terminal_reason: str | None = None,
+    ) -> None:
         filings_count = _count(session, Filing, company.id)
-        raw_facts_count = len(facts)
+        raw_facts_count = _count(session, RawFact, company.id)
         canonical_count = _count(session, CanonicalFact, company.id)
         latest_filing_row = session.execute(
             select(Filing)
@@ -453,9 +620,120 @@ class ContinuousResearchMachine:
             .limit(1)
         ).scalar_one_or_none()
         latest_filing = latest_filing_row.filing_date if latest_filing_row else None
+
+        report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
+        if report is None:
+            report = CompanyReport(
+                company_id=company.id,
+                ticker=ticker,
+                company_name=company.name,
+                as_of_date=date.today().isoformat(),
+                stance="NEUTRAL",
+            )
+            session.add(report)
+
+        report.ticker = ticker
+        report.company_name = company.name
+        report.as_of_date = date.today().isoformat()
+        report.stance = "NEUTRAL"
+        report.bullish_score = 40.0
+        report.bearish_score = 60.0
+        report.composite_score = 40.0
+        report.data_quality_tier = "PARTIAL"
+        report.pipeline_stage = "parked" if terminal_reason else _pipeline_stage(raw_facts_count, canonical_count)
+        report.latest_filing_date = latest_filing.isoformat() if latest_filing else None
+        report.key_stats = {
+            "filings_count": filings_count,
+            "raw_facts_count": raw_facts_count,
+            "canonical_facts_count": canonical_count,
+            "revenue": None,
+            "net_income": None,
+            "assets": None,
+            "liabilities": None,
+            "equity": None,
+            "owner_earnings": None,
+            "weighted_avg_diluted_shares": None,
+            "eps": None,
+            "overall_coverage_pct": _maybe_round(35.0 if raw_facts_count > 0 else 15.0),
+            "accounting_quality_score": 40.0,
+            "future_bucket": "HOLD",
+            "future_reason": (
+                "SEC CompanyFacts unavailable for this issuer; parked as research-only partial coverage."
+                if terminal_reason
+                else "Awaiting deep accountant pass."
+            ),
+            "terminal_reason": terminal_reason,
+        }
+        report.highlights = [
+            f"Coverage seeded: filings {filings_count}, raw facts {raw_facts_count}, canonical facts {canonical_count}.",
+            (
+                "SEC CompanyFacts is unavailable for this issuer, so the accountant parked this name with partial filing-only coverage."
+                if terminal_reason
+                else "This is a partial accountant report created to close universe coverage quickly."
+            ),
+            (
+                "This row is intentionally terminal for the research-only API and will not be retried by the unattended loop."
+                if terminal_reason
+                else "Deep canonicalization, statement builds, and final grading will continue in later passes."
+            ),
+        ]
+        report.report_markdown = "\n".join(
+            [
+                f"# {ticker} {'PARKED PARTIAL REPORT' if terminal_reason else 'PARTIAL REPORT'}",
+                "",
+                f"{company.name} has SEC filings and {'raw facts loaded' if raw_facts_count > 0 else 'filing-only coverage loaded'}.",
+                (
+                    "This row is operationally valid for the research-only API even though the issuer does not expose SEC CompanyFacts for unattended enrichment."
+                    if terminal_reason
+                    else "This row is operationally valid for universe coverage and will be upgraded by the deeper accountant pipeline."
+                ),
+            ]
+        )
+        report.source_versions = {
+            "report_machine": "V2_CONTINUOUS_MACHINE_PARTIAL",
+            "terminal_reason": terminal_reason or "",
+        }
+
+    def _build_report(self, session: Session, company: Company, ticker: str) -> None:
+        filings = session.execute(
+            select(Filing)
+            .where(Filing.company_id == company.id)
+            .order_by(Filing.filing_date.desc(), Filing.accepted_at.desc(), Filing.created_at.desc())
+        ).scalars().all()
+        facts = session.execute(
+            select(RawFact)
+            .where(RawFact.company_id == company.id)
+            .order_by(RawFact.period_end.desc(), RawFact.filed_date.desc(), RawFact.created_at.desc())
+        ).scalars().all()
+        filings_count = len(filings)
+        raw_facts_count = len(facts)
+        canonical_count = _count(session, CanonicalFact, company.id)
+        latest_filing_row = filings[0] if filings else None
+        latest_filing = latest_filing_row.filing_date if latest_filing_row else None
         years_of_history = len({fact.period_end.year for fact in facts if fact.period_end is not None})
         gics_sector = _sector_name(company.sic_description)
         gics_industry = company.sic_description or gics_sector
+        membership = membership_for_ticker(ticker)
+        prior_same_form_filing = next(
+            (
+                filing
+                for filing in filings[1:]
+                if latest_filing_row is not None and filing.form_type == latest_filing_row.form_type
+            ),
+            None,
+        )
+        textual_signal_bundle = build_textual_signals(
+            latest_filing_row,
+            prior_same_form_filing,
+            sec_user_agent=get_settings().sec_user_agent,
+        )
+        prior_same_form_filings = [
+            filing for filing in filings[1:] if latest_filing_row is not None and filing.form_type == latest_filing_row.form_type
+        ]
+        event_signal_bundle = build_event_red_flags(
+            filings,
+            sec_user_agent=get_settings().sec_user_agent,
+        )
 
         revenue_series = _series(facts, [
             "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -491,9 +769,12 @@ class ContinuousResearchMachine:
         owner_earnings = None
         if ocf is not None and capex is not None:
             owner_earnings = ocf - abs(capex)
-        margin_pct = _safe_divide(net_income, revenue)
-        if margin_pct is not None:
-            margin_pct *= 100
+        gross_profit = _latest_fact_from_concepts(facts, ["GrossProfit"])
+        cogs = _latest_fact_from_concepts(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
+        if gross_profit is None and revenue is not None and cogs is not None:
+            gross_profit = revenue - cogs
+        gross_margin_pct = _ratio_pct(gross_profit, revenue, ceiling=1000.0)
+        net_margin_pct = _ratio_pct(net_income, revenue, ceiling=1000.0)
         owner_earnings_margin_pct = _safe_divide(owner_earnings, revenue)
         if owner_earnings_margin_pct is not None:
             owner_earnings_margin_pct *= 100
@@ -578,7 +859,7 @@ class ContinuousResearchMachine:
             2,
         )
         margin_forecast_pct = round(
-            _clamp((margin_pct or 6.0) + max(0.0, accounting_quality_score - 62.0) * 0.05, -5.0, 32.0),
+            _clamp((net_margin_pct or 6.0) + max(0.0, accounting_quality_score - 62.0) * 0.05, -5.0, 32.0),
             2,
         )
         owner_earnings_forecast = round(
@@ -586,6 +867,18 @@ class ContinuousResearchMachine:
             2,
         ) if owner_earnings is not None else None
         eps = round(net_income / diluted_shares, 2) if net_income is not None and diluted_shares not in (None, 0) else None
+        security_count = len({security.ticker for security in company.securities if security.ticker})
+        governance_signal_bundle = build_governance_signals(
+            filings,
+            sec_user_agent=get_settings().sec_user_agent,
+            security_count=security_count,
+        )
+        non_gaap_signal_bundle = build_non_gaap_signals(
+            latest_filing_row,
+            prior_same_form_filings,
+            sec_user_agent=get_settings().sec_user_agent,
+            gaap_eps=eps,
+        )
         eps_forecast = round(eps * (1 + (revenue_forecast_next_year_pct / 100)), 2) if eps is not None else None
         scenario_valuations = _scenario_valuations(
             earnings_power=owner_earnings if owner_earnings and owner_earnings > 0 else net_income,
@@ -616,7 +909,6 @@ class ContinuousResearchMachine:
             forecast_confidence_pct=forecast_confidence_pct,
             revenue_forecast_next_year_pct=revenue_forecast_next_year_pct,
         )
-
         research = FundamentalResearchClassificationEngine.classify(
             company_id=company.cik,
             as_of_date=date.today().isoformat(),
@@ -642,6 +934,8 @@ class ContinuousResearchMachine:
             f"Factor pack ({factor_pack.period_label}): Beneish {_fmt_num(factor_pack.beneish_m_score)} | Piotroski {_fmt_num(float(factor_pack.piotroski_f_score) if factor_pack.piotroski_f_score is not None else None)} | Altman {_fmt_num(factor_pack.altman_z_score)}.",
             f"Forecast pack: rev next year {_fmt_pct(revenue_forecast_next_year_pct)} | EPS forecast {_fmt_num(eps_forecast)} | confidence {forecast_confidence_pct:.1f}%.",
         ]
+        if non_gaap_signal_bundle.non_gaap_eps is not None:
+            highlights.append(f"Non-GAAP EPS detected at {_fmt_num(non_gaap_signal_bundle.non_gaap_eps)}.")
         if factor_pack.warnings:
             highlights.append(f"Factor warnings: {'; '.join(factor_pack.warnings[:2])}.")
         report_lines = [
@@ -654,44 +948,45 @@ class ContinuousResearchMachine:
         ]
         report_markdown = "\n".join(report_lines)
 
-        record = session.execute(
-            select(ResearchRecord).where(
-                ResearchRecord.company_id == company.id,
-                ResearchRecord.as_of_date == date.today().isoformat(),
-            )
-        ).scalar_one_or_none()
-        if record is None:
-            record = ResearchRecord(company_id=company.id, as_of_date=date.today().isoformat(), classification="")
-            session.add(record)
-        record.classification = research.classification
-        record.classification_confidence = round(quality.research_confidence_pct / 100, 4)
-        record.accounting_quality_score = accounting_quality_score
-        record.owner_earnings_yield_pct = None
-        record.owner_earnings_growth_pct = revenue_growth_pct
-        record.roic_pct = profitability_ratio * 100 if profitability_ratio is not None else None
-        record.capital_allocation_score = balance_score
-        record.credit_quality_score = balance_score
-        record.bear_case_risk_score = bearish_score
-        record.forensic_risk_score = forensic_risk_score
-        record.valuation_range_low = None
-        record.valuation_range_high = None
-        record.current_price = None
-        record.margin_of_safety_pct = None
-        record.rules_triggered = [rule.rule_id for rule in research.rules_triggered]
-        record.rules_failed = [rule.rule_id for rule in research.rules_failed]
-        record.warnings = [*quality.data_quality_issues, *factor_pack.warnings]
-        record.classification_notes = f"{research.classification_notes}. Data quality: {quality.overall_tier}."
-        record.feature_versions = {
-            "classification": research.rule_version,
-            "data_quality": quality.assessment_version,
-            "factors": factor_pack.factor_version,
-            "report_machine": "V2_CONTINUOUS_MACHINE",
-        }
+        _upsert_research_record(
+            session,
+            company_id=company.id,
+            payload={
+                "company_id": company.id,
+                "as_of_date": date.today().isoformat(),
+                "classification": research.classification,
+                "classification_confidence": round(quality.research_confidence_pct / 100, 4),
+                "accounting_quality_score": accounting_quality_score,
+                "owner_earnings_yield_pct": None,
+                "owner_earnings_growth_pct": revenue_growth_pct,
+                "roic_pct": profitability_ratio * 100 if profitability_ratio is not None else None,
+                "capital_allocation_score": balance_score,
+                "credit_quality_score": balance_score,
+                "bear_case_risk_score": bearish_score,
+                "forensic_risk_score": forensic_risk_score,
+                "valuation_range_low": None,
+                "valuation_range_high": None,
+                "current_price": None,
+                "margin_of_safety_pct": None,
+                "rules_triggered": [rule.rule_id for rule in research.rules_triggered],
+                "rules_failed": [rule.rule_id for rule in research.rules_failed],
+                "warnings": [*quality.data_quality_issues, *factor_pack.warnings],
+                "classification_notes": f"{research.classification_notes}. Data quality: {quality.overall_tier}.",
+                "feature_versions": {
+                    "classification": research.rule_version,
+                    "data_quality": quality.assessment_version,
+                    "factors": factor_pack.factor_version,
+                    "report_machine": "V2_CONTINUOUS_MACHINE",
+                },
+            },
+        )
 
         report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
         if report is None:
             report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=date.today().isoformat(), stance=stance)
             session.add(report)
+        current_price = _safe_float(report.current_price)
+        market_cap = (current_price * diluted_shares) if current_price is not None and diluted_shares is not None else None
         report.ticker = ticker
         report.company_name = company.name
         report.as_of_date = date.today().isoformat()
@@ -702,7 +997,7 @@ class ContinuousResearchMachine:
         report.data_quality_tier = quality.overall_tier
         report.pipeline_stage = _pipeline_stage(raw_facts_count, canonical_count)
         report.latest_filing_date = latest_filing.isoformat() if latest_filing else None
-        report.current_price = None
+        report.current_price = current_price
         report.key_stats = {
             "filings_count": filings_count,
             "raw_facts_count": raw_facts_count,
@@ -715,7 +1010,8 @@ class ContinuousResearchMachine:
             "equity": _maybe_round(equity),
             "owner_earnings": _maybe_round(owner_earnings),
             "owner_earnings_margin_pct": _maybe_round(owner_earnings_margin_pct),
-            "margin_pct": _maybe_round(margin_pct),
+            "margin_pct": _maybe_round(net_margin_pct),
+            "gross_margin_pct": _maybe_round(gross_margin_pct),
             "weighted_avg_diluted_shares": _maybe_round(diluted_shares),
             "dilution_growth_pct": _maybe_round(dilution_growth_pct),
             "factor_period_label": factor_pack.period_label,
@@ -760,8 +1056,8 @@ class ContinuousResearchMachine:
         }
         standardized_financials = {
             "revenue": _maybe_round(revenue),
-            "cogs": _maybe_round(_latest_fact_from_concepts(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])),
-            "gross_profit": _maybe_round(_latest_fact_from_concepts(facts, ["GrossProfit"])),
+            "cogs": _maybe_round(cogs),
+            "gross_profit": _maybe_round(gross_profit),
             "sga": _maybe_round(_latest_fact_from_concepts(facts, ["SellingGeneralAndAdministrativeExpense"])),
             "r_and_d": _maybe_round(_latest_fact_from_concepts(facts, ["ResearchAndDevelopmentExpense"])),
             "operating_income": _maybe_round(_latest_fact_from_concepts(facts, ["OperatingIncomeLoss"])),
@@ -845,37 +1141,41 @@ class ContinuousResearchMachine:
                 _latest_fact_from_concepts(facts, ["DeferredRevenueCurrent", "ContractWithCustomerLiabilityCurrent"]),
                 _nth_value(deferred_revenue_series, 1),
             )),
-            "sga_pct_revenue": _maybe_round(_safe_divide(
+            "sga_pct_revenue": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["SellingGeneralAndAdministrativeExpense"]),
                 revenue,
-            ) * 100 if revenue not in (None, 0) else None),
+                ceiling=1000.0,
+            )),
             "sga_pct_revenue_delta": _maybe_round(_pct_change(
                 _safe_divide(_latest_fact_from_concepts(facts, ["SellingGeneralAndAdministrativeExpense"]), revenue),
                 _safe_divide(_nth_value(sga_series, 1), prior_revenue),
             )),
-            "capex_intensity_pct_rev": _maybe_round(_safe_divide(abs(capex) if capex is not None else None, revenue) * 100 if revenue not in (None, 0) and capex is not None else None),
+            "capex_intensity_pct_rev": _maybe_round(_ratio_pct(abs(capex) if capex is not None else None, revenue, ceiling=1000.0)),
             "capex_intensity_delta": _maybe_round(_pct_change(
                 _safe_divide(abs(capex) if capex is not None else None, revenue),
                 _safe_divide(abs(_nth_value(capex_series, 1)) if _nth_value(capex_series, 1) is not None else None, prior_revenue),
             )),
-            "gross_margin": _maybe_round(margin_pct),
-            "buyback_yield": _maybe_round(_safe_divide(
+            "gross_margin": _maybe_round(gross_margin_pct),
+            "buyback_yield": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["PaymentsForRepurchaseOfCommonStock"]),
                 assets,
-            ) * 100 if assets not in (None, 0) else None),
+                ceiling=1000.0,
+            )),
             "diluted_shares_yoy_change": _maybe_round(dilution_growth_pct),
-            "effective_tax_rate": _maybe_round(_safe_divide(
+            "effective_tax_rate": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["IncomeTaxExpenseBenefit"]),
                 _latest_fact_from_concepts(facts, ["IncomeBeforeTaxExpenseBenefit"]),
-            ) * 100 if _latest_fact_from_concepts(facts, ["IncomeBeforeTaxExpenseBenefit"]) not in (None, 0) else None),
+                ceiling=200.0,
+            )),
             "effective_tax_rate_3yr_avg": _maybe_round(_rolling_average([
                 _safe_divide(_nth_value(tax_expense_series, index), _nth_value(pretax_income_series, index))
                 for index in range(3)
             ], multiplier=100.0)),
-            "cash_tax_vs_book_tax_gap": _maybe_round(_safe_divide(
+            "cash_tax_vs_book_tax_gap": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["IncomeTaxesPaidNet"]),
                 _latest_fact_from_concepts(facts, ["IncomeTaxExpenseBenefit"]),
-            ) * 100 if _latest_fact_from_concepts(facts, ["IncomeTaxExpenseBenefit"]) not in (None, 0) else None),
+                ceiling=500.0,
+            )),
         }
         accrual_cash_quality = {
             "total_accruals_cf_method": _maybe_round((net_income - ocf) if net_income is not None and ocf is not None else None),
@@ -883,10 +1183,11 @@ class ContinuousResearchMachine:
             "fcf_ni_ratio": _maybe_round(_safe_divide(owner_earnings, net_income)),
             "net_operating_assets_pct_assets": _maybe_round(factor_pack.net_operating_assets_ratio),
             "cash_based_operating_profitability": _maybe_round(factor_pack.cash_based_operating_profitability),
-            "sbc_pct_revenue": _maybe_round(_safe_divide(
+            "sbc_pct_revenue": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["ShareBasedCompensation"]),
                 revenue,
-            ) * 100 if revenue not in (None, 0) else None),
+                ceiling=1000.0,
+            )),
             "discretionary_accruals_est": None,
             "sloan_accrual_ratio": _maybe_round(factor_pack.sloan_accrual_ratio),
         }
@@ -916,71 +1217,79 @@ class ContinuousResearchMachine:
             "forensic_scores": forensic_scores,
             "positive_quality": positive_quality,
             "event_red_flags": {
-                "auditor_name": None,
-                "auditor_tenure_years": None,
-                "auditor_changed_flag": False,
-                "auditor_change_date": None,
+                "auditor_name": event_signal_bundle.auditor_name,
+                "auditor_tenure_years": event_signal_bundle.auditor_tenure_years,
+                "auditor_changed_flag": event_signal_bundle.auditor_changed_flag,
+                "auditor_change_date": event_signal_bundle.auditor_change_date,
                 "going_concern_flag": False,
                 "material_weakness_flag": False,
                 "restatement_severity": "little-r" if latest_filing_row and latest_filing_row.is_amendment else "none",
                 "late_filer_flag": False,
-                "sec_comment_letter_flag": False,
-                "cfo_turnover_flag": False,
-                "cfo_turnover_date": None,
-                "ceo_turnover_flag": False,
-                "ceo_turnover_date": None,
+                "sec_comment_letter_flag": event_signal_bundle.sec_comment_letter_flag,
+                "cfo_turnover_flag": event_signal_bundle.cfo_turnover_flag,
+                "cfo_turnover_date": event_signal_bundle.cfo_turnover_date,
+                "ceo_turnover_flag": event_signal_bundle.ceo_turnover_flag,
+                "ceo_turnover_date": event_signal_bundle.ceo_turnover_date,
             },
             "textual_signals": {
-                "yoy_filing_similarity_score": None,
-                "risk_factor_similarity_score": None,
-                "mgmt_tone_score": None,
-                "reverse_factoring_disclosed": False,
-                "pension_discount_rate": None,
-                "pension_expected_return": None,
-                "related_party_revenue_pct": None,
-                "llm_summary": None,
+                "yoy_filing_similarity_score": textual_signal_bundle.yoy_filing_similarity_score,
+                "risk_factor_similarity_score": textual_signal_bundle.risk_factor_similarity_score,
+                "mgmt_tone_score": textual_signal_bundle.mgmt_tone_score,
+                "reverse_factoring_disclosed": textual_signal_bundle.reverse_factoring_disclosed,
+                "pension_discount_rate": textual_signal_bundle.pension_discount_rate,
+                "pension_expected_return": textual_signal_bundle.pension_expected_return,
+                "related_party_revenue_pct": textual_signal_bundle.related_party_revenue_pct,
+                "llm_summary": textual_signal_bundle.summary,
                 "llm_model_version": None,
                 "llm_confidence": None,
             },
             "non_gaap_forensics": {
                 "gaap_eps": _maybe_round(eps),
-                "non_gaap_eps": None,
-                "non_gaap_gap_pct": None,
-                "non_gaap_gap_3yr_trend": None,
-                "recurring_nonrecurring_flag": False,
+                "non_gaap_eps": _maybe_round(non_gaap_signal_bundle.non_gaap_eps),
+                "non_gaap_gap_pct": _maybe_round(non_gaap_signal_bundle.non_gaap_gap_pct),
+                "non_gaap_gap_3yr_trend": _maybe_round(non_gaap_signal_bundle.non_gaap_gap_3yr_trend),
+                "recurring_nonrecurring_flag": non_gaap_signal_bundle.recurring_nonrecurring_flag,
             },
             "governance_ownership": {
-                "insider_buy_cluster_flag": False,
-                "insider_net_shares_bought_90d": None,
-                "institutional_ownership_pct": None,
-                "institutional_ownership_qoq_delta": None,
-                "short_interest_pct_float": None,
-                "short_interest_delta": None,
-                "dual_class_flag": False,
-                "audit_fee_ratio": None,
+                "insider_buy_cluster_flag": governance_signal_bundle.insider_buy_cluster_flag,
+                "insider_net_shares_bought_90d": _maybe_round(governance_signal_bundle.insider_net_shares_bought_90d),
+                "institutional_ownership_pct": governance_signal_bundle.institutional_ownership_pct,
+                "institutional_ownership_qoq_delta": governance_signal_bundle.institutional_ownership_qoq_delta,
+                "short_interest_pct_float": governance_signal_bundle.short_interest_pct_float,
+                "short_interest_delta": governance_signal_bundle.short_interest_delta,
+                "dual_class_flag": governance_signal_bundle.dual_class_flag,
+                "audit_fee_ratio": _maybe_round(governance_signal_bundle.audit_fee_ratio),
             },
             "market_data_linkage": {
-                "price_asof": report.current_price,
-                "market_cap": _maybe_round((report.current_price * diluted_shares) if report.current_price is not None and diluted_shares is not None else None),
+                "price_asof": current_price,
+                "market_cap": _maybe_round(market_cap),
                 "ev": None,
                 "adv_20d": None,
                 "ev_ebitda": None,
-                "p_fcf": _maybe_round(_safe_divide(report.current_price, owner_earnings / diluted_shares) if report.current_price is not None and owner_earnings is not None and diluted_shares not in (None, 0) else None),
+                "p_fcf": _maybe_round(_safe_divide(current_price, owner_earnings / diluted_shares) if current_price is not None and owner_earnings is not None and diluted_shares not in (None, 0) else None),
             },
             "universe_tradability": {
-                "in_sp500": False,
-                "in_russell2000": False,
-                "in_nasdaq_comp": False,
-                "passes_liquidity_filter": None,
-                "passes_mcap_floor": None,
+                "in_sp500": membership.in_sp500,
+                "in_russell2000": membership.in_russell2000,
+                "in_nasdaq_comp": membership.in_nasdaq_comp,
+                "passes_liquidity_filter": _passes_liquidity_filter(current_price=current_price, market_cap=market_cap),
+                "passes_mcap_floor": bool(market_cap is not None and market_cap >= 1_000_000_000),
                 "excluded_financial_reit": gics_sector in {"Financials", "Real Estate"},
-                "excluded_biotech_prerevenue": False,
+                "excluded_biotech_prerevenue": _excluded_biotech_prerevenue(
+                    sector=gics_sector,
+                    revenue=revenue,
+                    net_income=net_income,
+                ),
                 "excluded_recent_ipo": years_of_history < 2,
             },
         }
         grading = ReportCardGradingEngine.grade(
             GradingInputs(
-                cash_oper_profitability_pctile=_percentile_proxy(factor_pack.cash_based_operating_profitability, scale=180.0, baseline=50.0),
+                cash_oper_profitability_pctile=_percentile_proxy(
+                    factor_pack.cash_based_operating_profitability,
+                    scale=180.0,
+                    baseline=50.0,
+                ) if factor_pack.cash_based_operating_profitability is not None else None,
                 capital_allocation_pctile=balance_score,
                 margin_trajectory_pctile=_clamp(margin_forecast_pct + 50.0, 0.0, 100.0) if margin_forecast_pct is not None else None,
                 balance_sheet_strength_pctile=balance_score,
@@ -1011,7 +1320,7 @@ class ContinuousResearchMachine:
                 sustained_beneish_breach=bool(factor_pack.beneish_m_score is not None and factor_pack.beneish_m_score > -1.78),
                 going_concern_flag=False,
                 big_r_restatement_flag=False,
-                unscheduled_auditor_change_flag=False,
+                unscheduled_auditor_change_flag=event_signal_bundle.auditor_changed_flag,
                 base_unit=1.0,
                 sector_cap_remaining=1.0,
                 sector_target=1.0,
@@ -1027,6 +1336,8 @@ class ContinuousResearchMachine:
         market_data_linkage = section_payloads["market_data_linkage"]
         universe_tradability = section_payloads["universe_tradability"]
         final_verdict = {
+            "schema_version": "report_card_v2",
+            "pipeline_run_id": f"{company.cik}:{latest_filing_row.accession_number}" if latest_filing_row else company.cik,
             "current_action": grading.action,
             "veto_triggered": bool(grading.veto_triggered or research.classification == "REJECTED_BY_RULES"),
             "veto_reason": grading.veto_reason or ("classification rejected by rules" if research.classification == "REJECTED_BY_RULES" else None),
@@ -1040,6 +1351,7 @@ class ContinuousResearchMachine:
             "position_size": round(grading.position_size, 4),
             "pqc": _maybe_round(grading.pqc),
             "forecast_adjustment": _maybe_round(grading.forecast_adjustment),
+            "data_completeness_pct": _maybe_round(quality.overall_coverage_pct),
             "score_lineage": {
                 "canonical_score_name": "positive_quality_score",
                 "canonical_score_value": _maybe_round(grading.grade_score),
@@ -1179,6 +1491,149 @@ def _safe_divide(numerator: float | None, denominator: float | None) -> float | 
     if numerator is None or denominator in (None, 0):
         return None
     return numerator / denominator
+
+
+def _backlog_reason(*, report_id: Any, pipeline_stage: str | None) -> str | None:
+    if report_id is None:
+        return "missing_report"
+    if pipeline_stage == "parked":
+        return None
+    if pipeline_stage != "reports-ready":
+        return f"pipeline_{pipeline_stage or 'unknown'}"
+    return None
+
+
+def _is_runnable_backlog_reason(reason: str) -> bool:
+    return reason in {
+        "missing_report",
+        "pipeline_filings-only",
+        "pipeline_facts-ingested",
+        "pipeline_seeded",
+        "pipeline_unknown",
+    }
+
+
+def _upsert_research_record(session: Session, *, company_id: Any, payload: dict[str, Any]) -> None:
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        stmt = pg_insert(ResearchRecord).values(**payload)
+        update_columns = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"company_id", "as_of_date"}
+        }
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_research_records_company_date",
+            set_=update_columns,
+        )
+        session.execute(stmt)
+        return
+
+    record = session.execute(
+        select(ResearchRecord).where(
+            ResearchRecord.company_id == company_id,
+            ResearchRecord.as_of_date == payload["as_of_date"],
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        record = ResearchRecord(company_id=company_id, as_of_date=payload["as_of_date"], classification="")
+        session.add(record)
+    for key, value in payload.items():
+        setattr(record, key, value)
+
+
+def _filter_priority_rows(rows: list[tuple[Any, str, str | None, str | None, str | None]], *, limit: int) -> list[tuple[Any, str]]:
+    selected: list[tuple[Any, str]] = []
+    fallback: list[tuple[Any, str]] = []
+    chosen_by_company: dict[Any, tuple[bool, int, str]] = {}
+    for company_id, ticker, company_name, entity_type, security_type in rows:
+        is_priority = _is_priority_operating_equity(
+            ticker=ticker,
+            company_name=company_name,
+            entity_type=entity_type,
+            security_type=security_type,
+        )
+        rank = _security_rank(ticker)
+        existing = chosen_by_company.get(company_id)
+        candidate = (is_priority, rank, ticker)
+        if existing is None or candidate > existing:
+            chosen_by_company[company_id] = candidate
+    for company_id, (is_priority, _rank, ticker) in chosen_by_company.items():
+        (selected if is_priority else fallback).append((company_id, ticker))
+    if selected:
+        return selected[:limit]
+    return fallback[:limit]
+
+
+def _is_priority_operating_equity(
+    *,
+    ticker: str | None,
+    company_name: str | None,
+    entity_type: str | None,
+    security_type: str | None,
+) -> bool:
+    normalized_ticker = (ticker or "").upper()
+    normalized_name = (company_name or "").strip().lower()
+    normalized_entity_type = (entity_type or "").strip().lower()
+    normalized_security_type = (security_type or "").strip().lower()
+
+    if normalized_security_type and normalized_security_type not in {"common_stock", "common"}:
+        return False
+    if normalized_entity_type and normalized_entity_type not in {"operating", "other"}:
+        return False
+    if any(marker in normalized_name for marker in _NON_OPERATING_NAME_MARKERS):
+        return False
+    if "-P" in normalized_ticker or normalized_ticker.endswith("-WT") or normalized_ticker.endswith("-WS"):
+        return False
+    if len(normalized_ticker) >= 5 and normalized_ticker.endswith(("W", "U", "RT", "R")):
+        return False
+    return True
+
+
+def _security_rank(ticker: str | None) -> int:
+    normalized_ticker = (ticker or "").upper()
+    rank = 0
+    if "-" not in normalized_ticker:
+        rank += 20
+    if len(normalized_ticker) <= 4:
+        rank += 10
+    if normalized_ticker.endswith(("WT", "WS", "W", "U", "RT", "R")):
+        rank -= 20
+    if "-P" in normalized_ticker:
+        rank -= 30
+    return rank
+
+
+def _scaled_divide(numerator: float | None, denominator: float | None, *, multiplier: float) -> float | None:
+    value = _safe_divide(numerator, denominator)
+    if value is None:
+        return None
+    return value * multiplier
+
+
+def _ratio_pct(numerator: float | None, denominator: float | None, *, ceiling: float) -> float | None:
+    value = _scaled_divide(numerator, denominator, multiplier=100.0)
+    if value is None:
+        return None
+    if abs(value) > ceiling:
+        return None
+    return value
+
+
+def _passes_liquidity_filter(*, current_price: float | None, market_cap: float | None) -> bool | None:
+    if current_price is None and market_cap is None:
+        return None
+    if current_price is not None and current_price < 5:
+        return False
+    return not (market_cap is not None and market_cap < 300_000_000)
+
+
+def _excluded_biotech_prerevenue(*, sector: str, revenue: float | None, net_income: float | None) -> bool:
+    if sector != "Healthcare":
+        return False
+    if revenue is None or revenue <= 1_000_000:
+        return True
+    return bool(net_income is not None and net_income < 0 and revenue < 25_000_000)
 
 
 def _sector_name(sic_description: str | None) -> str:

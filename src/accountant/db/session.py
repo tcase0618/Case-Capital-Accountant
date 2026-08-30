@@ -18,17 +18,28 @@ def create_db_engine(url: str | None = None, *, settings: Settings | None = None
     settings = settings or get_settings()
     database_url = url or settings.database_url
     connect_args: dict[str, object] = {}
+    engine_kwargs: dict[str, object] = {
+        "pool_pre_ping": True,
+        "future": True,
+    }
     if database_url.startswith("sqlite"):
         connect_args = {
             "timeout": 120,
             "check_same_thread": False,
         }
-    engine = create_engine(
-        database_url,
-        pool_pre_ping=True,
-        future=True,
-        connect_args=connect_args,
-    )
+    elif database_url.startswith("postgresql"):
+        connect_args = {
+            "connect_timeout": 5,
+        }
+        engine_kwargs.update(
+            {
+                "pool_size": 20,
+                "max_overflow": 40,
+                "pool_timeout": 10,
+                "pool_recycle": 1800,
+            }
+        )
+    engine = create_engine(database_url, connect_args=connect_args, **engine_kwargs)
     if engine.dialect.name == "sqlite":
         _enable_sqlite_foreign_keys(engine)
     return engine

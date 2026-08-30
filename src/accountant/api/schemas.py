@@ -185,6 +185,7 @@ class DashboardStatsResponse(BaseModel):
     total_canonical_facts: int
     total_statement_snapshots: int
     total_research_records: int
+    companies_with_filings: int = 0
     companies_with_raw_facts: int = 0
     companies_with_canonical_facts: int = 0
     companies_with_statement_snapshots: int = 0
@@ -295,6 +296,42 @@ class IntegrationStatusResponse(BaseModel):
     errors: list[dict[str, str | int | None]] | None = None
 
 
+class AccountantIntegrationStatusResponse(BaseModel):
+    generated_at: str
+    ready_for_readonly_integration: bool
+    completion_state: str
+    total_companies: int
+    reports_cached: int
+    pending_companies: int
+    runnable_companies: int
+    blocked_companies: int
+    blocked_examples: list[dict[str, str]] = []
+    latest_machine_action: str | None = None
+    latest_machine_cycle_at: str | None = None
+    companies_with_reports: int = 0
+    companies_with_report_cards: int = 0
+    companies_with_canonical_facts: int = 0
+    companies_with_statement_snapshots: int = 0
+
+
+class AccountantIntegrationTickerResponse(BaseModel):
+    generated_at: str
+    ticker: str
+    company_name: str
+    ready_for_readonly_integration: bool
+    pipeline_stage: str
+    report_available: bool
+    report_card_available: bool
+    canonical_facts_count: int = 0
+    statement_snapshots_count: int = 0
+    latest_report_date: str | None = None
+    latest_report_card_filed_date: str | None = None
+    latest_report_updated_at: str | None = None
+    stance: str | None = None
+    future_bucket: str | None = None
+    data_quality_tier: str | None = None
+
+
 class CompanyReportResponse(BaseModel):
     ticker: str
     company_name: str
@@ -327,7 +364,10 @@ class ReportCardResponse(BaseModel):
     accepted_at: str | None = None
     accession_number: str
     source_url: str | None = None
+    raw_filing_sha256: str | None = None
     is_restatement: bool
+    restates_report_card_id: str | None = None
+    tag_map_version: str
     prior_report_card_id: str | None = None
     standardized_financials: dict[str, object]
     growth_trend_deltas: dict[str, object]
@@ -438,6 +478,9 @@ class ReportMachineStatusResponse(BaseModel):
     processed_cycles: int
     last_processed_ticker: str | None = None
     pending_companies: int = 0
+    runnable_companies: int = 0
+    blocked_companies: int = 0
+    blocked_examples: list[dict[str, str]] = []
     universe_counts: dict[str, int]
     last_universe_sync_date: str | None = None
     worker_states: list[ReportWorkerStatusResponse] = []

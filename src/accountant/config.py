@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     sec_user_agent: str = Field(default="", description="SEC-compliant User-Agent")
     database_url: str = Field(
-        default="sqlite:///./data/accountant.db"
+        default="postgresql+psycopg://accountant:accountant@127.0.0.1:5432/accountant"
     )
     accountant_env: str = Field(default="development")
     log_level: str = Field(default="INFO")

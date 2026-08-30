@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import accountant.api.app as api_app
 from accountant.api.app import app, get_session
-from accountant.db.models import Company, Filing, FilingDocument, RawFact, ReportCard, Security
+from accountant.db.models import Company, CompanyReport, Filing, FilingDocument, RawFact, ReportCard, Security
 from accountant.ingest.companies import BulkCompanyImportResult
 
 
@@ -208,6 +208,7 @@ def test_dashboard_returns_aggregate_counts(test_session) -> None:
         "total_canonical_facts": 0,
         "total_statement_snapshots": 0,
         "total_research_records": 0,
+        "companies_with_filings": 1,
         "companies_with_raw_facts": 1,
         "companies_with_canonical_facts": 0,
         "companies_with_statement_snapshots": 0,
@@ -253,6 +254,74 @@ def test_company_filings_include_documents(test_session) -> None:
     assert payload[0]["accession_number"] == "0000320193-25-000001"
     assert payload[0]["documents"][0]["document_name"] == "aapl-20250927x10k.htm"
     assert payload[0]["accepted_at"] == "2025-11-01T16:30:00"
+
+
+def test_accountant_integration_status_and_ticker_endpoint(test_session) -> None:
+    company = _seed_company_with_filings_and_facts(test_session)
+    report = CompanyReport(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        as_of_date="2025-11-01",
+        stance="BULLISH",
+        bullish_score=82.0,
+        bearish_score=18.0,
+        composite_score=80.5,
+        data_quality_tier="HIGH",
+        pipeline_stage="reports-ready",
+        latest_filing_date="2025-11-01",
+        key_stats={"future_bucket": "future"},
+        highlights=["one", "two"],
+        report_markdown="report",
+    )
+    report_card = ReportCard(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        report_card_id="0000320193_10-K_2025-09-27_2025-11-01",
+        cik="0000320193",
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        filing_type="10-K",
+        period_of_report=date(2025, 9, 27),
+        filed_date=date(2025, 11, 1),
+        accession_number="0000320193-25-000001",
+        standardized_financials={},
+        growth_trend_deltas={},
+        accrual_cash_quality={},
+        forensic_scores={},
+        positive_quality={},
+        event_red_flags={},
+        textual_signals={},
+        non_gaap_forensics={},
+        governance_ownership={},
+        market_data_linkage={},
+        universe_tradability={},
+        final_verdict={},
+    )
+    test_session.add_all([report, report_card])
+    test_session.commit()
+
+    app.dependency_overrides[get_session] = _session_override(test_session)
+    client = TestClient(app)
+
+    integration_response = client.get("/api/integration/accountant")
+    ticker_response = client.get("/api/integration/accountant/AAPL")
+
+    app.dependency_overrides.clear()
+
+    assert integration_response.status_code == 200
+    integration_payload = integration_response.json()
+    assert integration_payload["companies_with_reports"] >= 1
+    assert integration_payload["companies_with_report_cards"] >= 1
+
+    assert ticker_response.status_code == 200
+    ticker_payload = ticker_response.json()
+    assert ticker_payload["ticker"] == "AAPL"
+    assert ticker_payload["report_available"] is True
+    assert ticker_payload["report_card_available"] is True
+    assert ticker_payload["pipeline_stage"] == "reports-ready"
+    assert ticker_payload["ready_for_readonly_integration"] is True
 
 
 def test_import_coverage_universe_endpoint(test_session, monkeypatch) -> None:
@@ -373,6 +442,8 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
         source_url="https://www.sec.gov/Archives/aapl-2025",
         raw_filing_sha256="abc",
         is_restatement=False,
+        restates_report_card_id=None,
+        tag_map_version="CANONICAL_MAPPING_V1",
         standardized_financials={"revenue": 100.0},
         growth_trend_deltas={"revenue_yoy_growth": 12.5},
         accrual_cash_quality={"cash_conversion_ratio": 1.1},
@@ -385,7 +456,10 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
         market_data_linkage={"market_cap": 123456789.0},
         universe_tradability={"excluded_recent_ipo": False},
         final_verdict={
+            "schema_version": "report_card_v2",
+            "pipeline_run_id": "0000320193:0000320193-25-000001",
             "grade": "B",
+            "data_completeness_pct": 81.2,
             "next_expected_filing_date": "2026-11-01",
             "score_lineage": {
                 "canonical_score_name": "positive_quality_score",
@@ -408,6 +482,10 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert payload["gics_sector"] == "Technology"
     assert payload["gics_industry"] == "Electronic Computers"
     assert payload["exchange"] == "NASDAQ"
+    assert payload["raw_filing_sha256"] == "abc"
+    assert payload["tag_map_version"] == "CANONICAL_MAPPING_V1"
     assert payload["market_data_linkage"]["market_cap"] == 123456789.0
+    assert payload["final_verdict"]["schema_version"] == "report_card_v2"
+    assert payload["final_verdict"]["data_completeness_pct"] == 81.2
     assert payload["final_verdict"]["next_expected_filing_date"] == "2026-11-01"
     assert payload["final_verdict"]["score_lineage"]["canonical_score_name"] == "positive_quality_score"
