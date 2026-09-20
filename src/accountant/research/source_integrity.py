@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
+
+from accountant.db.models import Filing
 
 SOURCE_INTEGRITY_VERSION = "SOURCE_INTEGRITY_V1"
 
@@ -34,17 +36,12 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
     bottleneck_count = _exact_scalar(session, "select count(*) from company_bottleneck_snapshots")
 
     latest = session.execute(
-        text(
-            """
-            select filing_date::text, accepted_at::text
-            from filings
-            order by filing_date desc nulls last, accepted_at desc nulls last
-            limit 1
-            """
-        )
+        select(Filing.filing_date, Filing.accepted_at)
+        .order_by(Filing.filing_date.desc(), Filing.accepted_at.desc())
+        .limit(1)
     ).first()
-    latest_filing_date = latest[0] if latest else None
-    latest_accepted_at = latest[1] if latest else None
+    latest_filing_date = latest[0].isoformat() if latest and latest[0] else None
+    latest_accepted_at = latest[1].isoformat() if latest and latest[1] else None
     days_since_latest = _days_since(latest_filing_date)
 
     raw_source_sample = _raw_fact_source_sample(session)

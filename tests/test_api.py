@@ -673,6 +673,8 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
 
     response = client.get("/api/report-cards/AAPL")
     ftm_response = client.get("/api/ftm/overview")
+    packet_response = client.get("/api/research-packets/AAPL")
+    readiness_response = client.get("/api/deployment/readiness")
 
     app.dependency_overrides.clear()
 
@@ -690,6 +692,11 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert payload["final_verdict"]["score_lineage"]["canonical_score_name"] == "positive_quality_score"
     assert ftm_response.status_code == 200
     assert ftm_response.json()["version"] == "FTM_MARKET_CAP_MAP_V1"
+    assert packet_response.status_code == 200
+    assert packet_response.json()["packet_version"] == "ACCOUNTANT_RESEARCH_PACKET_V1"
+    assert packet_response.json()["execution_allowed"] is False
+    assert readiness_response.status_code == 200
+    assert readiness_response.json()["ready_for_next_phase"] is False
 
 
 def test_company_change_timeline_returns_filing_deltas_and_source_link(test_session) -> None:

@@ -54,6 +54,7 @@ from accountant.research.filing_signal_engine import (
 )
 from accountant.research.grading_engine import GradingInputs, ReportCardGradingEngine
 from accountant.research.report_cards import persist_report_card
+from accountant.research.research_controls import build_research_controls, build_valuation_range
 from accountant.research.universe_signal_engine import membership_for_ticker
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
@@ -1881,6 +1882,20 @@ class ContinuousResearchMachine:
             "captured_at": datetime.now(UTC).isoformat(),
             "status": "captured" if cc_valuation is not None else "unavailable_missing_earnings_or_share_data",
         }
+        final_verdict["valuation_range"] = build_valuation_range(
+            scenario_values=scenario_valuations,
+            cc_valuation=cc_valuation,
+            confidence_pct=forecast_confidence_pct,
+        )
+        final_verdict["research_controls"] = build_research_controls(
+            data_completeness_pct=quality.overall_coverage_pct,
+            canonical_facts_count=canonical_count,
+            route_family=route.family,
+            lane1_supported=route.lane1_supported,
+            veto_triggered=bool(grading.veto_triggered or research.classification == "REJECTED_BY_RULES"),
+            grade_score=grading.grade_score,
+            valuation_available=cc_valuation is not None,
+        )
         session.flush()
         persist_report_card(
             session,

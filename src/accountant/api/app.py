@@ -33,6 +33,7 @@ from accountant.api.schemas import (
     CompanyResponse,
     DashboardResponse,
     DashboardStatsResponse,
+    DeploymentReadinessResponse,
     FilingDocumentResponse,
     FilingFeedItemResponse,
     FilingResponse,
@@ -48,6 +49,7 @@ from accountant.api.schemas import (
     RawFactResponse,
     ReportCardResponse,
     ReportMachineStatusResponse,
+    ResearchPacketResponse,
     ResearchRecordResponse,
     SectorProfileResponse,
     SectorSummaryResponse,
@@ -96,6 +98,7 @@ from accountant.research.operating_mode import operating_mode_payload
 from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
 from accountant.research.report_machine import MACHINE
+from accountant.research.research_controls import build_research_controls
 from accountant.research.sector_intelligence import (
     list_sector_summaries,
     sector_profile,
@@ -1304,6 +1307,87 @@ def get_company_market_quote(ticker: str) -> MarketQuoteResponse:
 @app.get("/api/operating-mode", response_model=OperatingModeResponse)
 def get_operating_mode() -> OperatingModeResponse:
     return OperatingModeResponse(**operating_mode_payload(get_settings()))
+
+
+@app.get("/api/research-packets/{ticker}", response_model=ResearchPacketResponse)
+def get_research_packet(ticker: str, session: SessionDep) -> ResearchPacketResponse:
+    company, resolved_ticker = _get_company_or_404(session, ticker)
+    report = _latest_report_for_company(session, company.id)
+    card = latest_report_card_for_ticker(session, resolved_ticker)
+    mode = operating_mode_payload(get_settings())
+    report_response = None
+    controls: dict[str, object] = {}
+    if report is not None:
+        report_response = CompanyReportResponse(
+            ticker=report.ticker,
+            company_name=report.company_name,
+            as_of_date=report.as_of_date,
+            stance=report.stance,
+            bullish_score=report.bullish_score,
+            bearish_score=report.bearish_score,
+            composite_score=report.composite_score,
+            data_quality_tier=report.data_quality_tier,
+            pipeline_stage=report.pipeline_stage,
+            latest_filing_date=report.latest_filing_date,
+            current_price=report.current_price,
+            key_stats=report.key_stats,
+            highlights=report.highlights,
+            report_markdown=report.report_markdown,
+            updated_at=report.updated_at.isoformat() if report.updated_at else None,
+        )
+    if card is not None:
+        controls = dict(card.final_verdict or {}).get("research_controls") or build_research_controls(
+            data_completeness_pct=dict(card.final_verdict or {}).get("data_completeness_pct"),
+            canonical_facts_count=int(dict(card.standardized_financials or {}).get("canonical_facts_count") or 0),
+            route_family=str(dict(card.final_verdict or {}).get("route_family") or "unknown"),
+            lane1_supported=bool(dict(card.final_verdict or {}).get("lane1_supported")),
+            veto_triggered=bool(dict(card.final_verdict or {}).get("veto_triggered")),
+            grade_score=dict(card.final_verdict or {}).get("grade_score"),
+            valuation_available=bool(dict(card.final_verdict or {}).get("valuation_snapshot", {}).get("cc_valuation")),
+        )
+    source = build_source_integrity_snapshot(session)
+    return ResearchPacketResponse(
+        packet_version="ACCOUNTANT_RESEARCH_PACKET_V1",
+        packet_id=card.report_card_id if card else f"{resolved_ticker}:NO_REPORT_CARD",
+        generated_at=datetime.now(UTC).isoformat(),
+        operating_mode=mode,
+        ticker=resolved_ticker,
+        company_name=company.name,
+        research_only=True,
+        execution_allowed=False,
+        report=report_response,
+        report_card=_report_card_response(card) if card else None,
+        research_controls=controls,
+        source_integrity=source,
+        limitations=[
+            "This packet is research-only and cannot submit, route, or manage orders.",
+            "Missing or stale fields remain explicit; the packet does not infer unavailable accounting facts.",
+        ],
+    )
+
+
+@app.get("/api/deployment/readiness", response_model=DeploymentReadinessResponse)
+def deployment_readiness(session: SessionDep) -> DeploymentReadinessResponse:
+    mode = operating_mode_payload(get_settings())
+    machine = MACHINE.snapshot()
+    source = build_source_integrity_snapshot(session)
+    gates = [
+        {"name": "research_only", "passed": mode["execution_allowed"] is False, "detail": "Accountant execution authority is blocked."},
+        {"name": "machine_running", "passed": bool(machine.get("running")), "detail": machine.get("last_action") or "machine status unavailable"},
+        {"name": "source_integrity", "passed": source.get("source_grade") in {"STRONG", "WATCH"}, "detail": source.get("source_grade")},
+        {"name": "blocked_companies", "passed": int(machine.get("blocked_companies") or 0) == 0, "detail": machine.get("blocked_companies") or 0},
+        {"name": "stability_window", "passed": False, "detail": "Seven-day evidence is not yet persisted."},
+    ]
+    ready = all(bool(gate["passed"]) for gate in gates)
+    return DeploymentReadinessResponse(
+        version="DEPLOYMENT_READINESS_V1",
+        generated_at=datetime.now(UTC).isoformat(),
+        operating_mode=mode,
+        ready_for_next_phase=ready,
+        next_phase=str(mode["next_mode"]) if mode["next_mode"] else None,
+        gates=gates,
+        stability_evidence={"status": "not_recorded", "required_days": 7, "completed_days": 0},
+    )
 
 
 @app.get("/api/reports", response_model=list[CompanyReportResponse])

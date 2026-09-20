@@ -362,6 +362,32 @@ class FTMSectorResponse(BaseModel):
     coverage_notes: list[str]
 
 
+class ResearchPacketResponse(BaseModel):
+    packet_version: str
+    packet_id: str
+    generated_at: str
+    operating_mode: dict[str, object]
+    ticker: str
+    company_name: str
+    research_only: bool
+    execution_allowed: bool
+    report: CompanyReportResponse | None = None
+    report_card: ReportCardResponse | None = None
+    research_controls: dict[str, object]
+    source_integrity: dict[str, object]
+    limitations: list[str]
+
+
+class DeploymentReadinessResponse(BaseModel):
+    version: str
+    generated_at: str
+    operating_mode: dict[str, object]
+    ready_for_next_phase: bool
+    next_phase: str | None = None
+    gates: list[dict[str, object]]
+    stability_evidence: dict[str, object]
+
+
 class AccountantIntegrationTickerResponse(BaseModel):
     generated_at: str
     ticker: str
@@ -392,7 +418,7 @@ class CompanyReportResponse(BaseModel):
     pipeline_stage: str
     latest_filing_date: str | None = None
     current_price: float | None = None
-    key_stats: dict[str, float | int | str | None]
+    key_stats: dict[str, object]
     highlights: list[str]
     report_markdown: str
     updated_at: str | None = None
