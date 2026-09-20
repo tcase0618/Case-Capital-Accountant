@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +36,28 @@ class Settings(BaseSettings):
     machine_universes: str = Field(default="sp500,nasdaq,russell2000")
     machine_batch_size: int = Field(default=10)
     machine_workers: int = Field(default=8)
+
+    # Zero disables a limit. Production uses these to preserve operating headroom.
+    storage_max_database_gb: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("ACCOUNTANT_STORAGE_MAX_DATABASE_GB", "STORAGE_MAX_DATABASE_GB"),
+    )
+    storage_min_free_disk_gb: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices("ACCOUNTANT_STORAGE_MIN_FREE_DISK_GB", "STORAGE_MIN_FREE_DISK_GB"),
+    )
+    storage_max_cycle_growth_gb: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "ACCOUNTANT_STORAGE_MAX_CYCLE_GROWTH_GB", "STORAGE_MAX_CYCLE_GROWTH_GB"
+        ),
+    )
+    storage_worker_reserve_mb: int = Field(
+        default=128,
+        validation_alias=AliasChoices(
+            "ACCOUNTANT_STORAGE_WORKER_RESERVE_MB", "STORAGE_WORKER_RESERVE_MB"
+        ),
+    )
 
     sec_base_www: str = Field(default="https://www.sec.gov")
     sec_base_data: str = Field(default="https://data.sec.gov")

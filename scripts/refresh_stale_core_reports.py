@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ from accountant.db.models import Company, CompanyReport
 from accountant.financial.snapshot_service import build_company_statement_snapshots
 from accountant.ingest.companyfacts import ingest_company_facts_payload
 from accountant.logging import configure_logging, get_logger
+from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
 from accountant.research.buy_board import sync_buy_board_candidate
 from accountant.research.report_machine import MACHINE
 from accountant.sec import SecClient
@@ -37,6 +39,14 @@ CORE_FORMS = (
     "40-F/A",
     "6-K",
     "6-K/A",
+)
+MATERIAL_EVENT_FORMS = (
+    "8-K",
+    "8-K/A",
+    "NT 10-K",
+    "NT 10-Q",
+    "UPLOAD",
+    "CORRESP",
 )
 
 
@@ -60,6 +70,59 @@ class RefreshCounters:
     errors: int = 0
 
 
+class StorageGate:
+    """Stops new CompanyFacts jobs before a constrained VPS loses headroom."""
+
+    def __init__(self, *, engine: Any, data_dir, budget: StorageBudget, reserve_mb: int) -> None:
+        self._engine = engine
+        self._data_dir = data_dir
+        self._budget = budget
+        self._reserve_bytes = max(0, reserve_mb) * 1024 * 1024
+        self._lock = threading.Lock()
+        self._reserved_bytes = 0
+        self._start_database_bytes = self._database_size()
+        self.stop_reason: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return any(
+            (
+                self._budget.max_database_bytes,
+                self._budget.min_free_disk_bytes,
+                self._budget.max_cycle_growth_bytes,
+            )
+        )
+
+    def claim(self) -> bool:
+        if not self.enabled:
+            return True
+        with self._lock:
+            decision = evaluate_storage_budget(
+                self._budget,
+                database_bytes=self._database_size(),
+                disk_free_bytes=shutil.disk_usage(self._data_dir).free,
+                cycle_start_database_bytes=self._start_database_bytes,
+                reserved_bytes=self._reserved_bytes + self._reserve_bytes,
+            )
+            if not decision.allowed:
+                self.stop_reason = decision.reason
+                return False
+            self._reserved_bytes += self._reserve_bytes
+            return True
+
+    def release(self) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._reserved_bytes = max(0, self._reserved_bytes - self._reserve_bytes)
+
+    def _database_size(self) -> int:
+        if self._engine.dialect.name != "postgresql":
+            return 0
+        with self._engine.connect() as connection:
+            return int(connection.execute(text("select pg_database_size(current_database())")).scalar_one())
+
+
 def _load_stale_jobs(session_factory: Any, *, limit: int | None, ticker: str | None) -> list[StaleReportJob]:
     limit_sql = "limit :limit" if limit else ""
     ticker_sql = "and upper(s.ticker) = upper(:ticker)" if ticker else ""
@@ -71,7 +134,8 @@ def _load_stale_jobs(session_factory: Any, *, limit: int | None, ticker: str | N
                 max(coalesce(accepted_at, filing_date::timestamp with time zone)) as latest_core_at
             from filings
             where form_type in (
-                '10-K','10-K/A','10-Q','10-Q/A','20-F','20-F/A','40-F','40-F/A','6-K','6-K/A'
+                '10-K','10-K/A','10-Q','10-Q/A','20-F','20-F/A','40-F','40-F/A','6-K','6-K/A',
+                '8-K','8-K/A','NT 10-K','NT 10-Q','UPLOAD','CORRESP'
             )
             group by company_id
         ),
@@ -140,6 +204,7 @@ def _worker(
     session_factory: Any,
     shared_limiter: RateLimiter,
     refresh_facts: bool,
+    storage_gate: StorageGate,
 ) -> None:
     settings = get_settings()
     sec_client = SecClient(settings=settings)
@@ -149,6 +214,8 @@ def _worker(
         while True:
             with queue_lock:
                 if not queue:
+                    return
+                if not storage_gate.claim():
                     return
                 job = queue.popleft()
                 remaining = len(queue)
@@ -223,6 +290,7 @@ def _worker(
                 )
             finally:
                 session.close()
+                storage_gate.release()
     finally:
         companyfacts_client.close()
 
@@ -239,7 +307,8 @@ def _remaining_stale_count(session_factory: Any) -> int:
                             max(coalesce(accepted_at, filing_date::timestamp with time zone)) as latest_core_at
                         from filings
                         where form_type in (
-                            '10-K','10-K/A','10-Q','10-Q/A','20-F','20-F/A','40-F','40-F/A','6-K','6-K/A'
+                            '10-K','10-K/A','10-Q','10-Q/A','20-F','20-F/A','40-F','40-F/A','6-K','6-K/A',
+                            '8-K','8-K/A','NT 10-K','NT 10-Q','UPLOAD','CORRESP'
                         )
                         group by company_id
                     ),
@@ -267,12 +336,40 @@ def main() -> int:
     parser.add_argument("--ticker", type=str, default=None)
     parser.add_argument("--skip-companyfacts", action="store_true")
     parser.add_argument("--log-level", default="WARNING")
+    parser.add_argument("--max-database-gb", type=float, default=None)
+    parser.add_argument("--min-free-disk-gb", type=float, default=None)
+    parser.add_argument("--max-cycle-growth-gb", type=float, default=None)
+    parser.add_argument("--storage-worker-reserve-mb", type=int, default=None)
     args = parser.parse_args()
 
     configure_logging(args.log_level)
     settings = get_settings()
     engine = create_db_engine(settings=settings)
     session_factory = create_session_factory(engine)
+    storage_gate = StorageGate(
+        engine=engine,
+        data_dir=settings.data_dir,
+        budget=StorageBudget(
+            max_database_gb=(
+                settings.storage_max_database_gb if args.max_database_gb is None else args.max_database_gb
+            ),
+            min_free_disk_gb=(
+                settings.storage_min_free_disk_gb
+                if args.min_free_disk_gb is None
+                else args.min_free_disk_gb
+            ),
+            max_cycle_growth_gb=(
+                settings.storage_max_cycle_growth_gb
+                if args.max_cycle_growth_gb is None
+                else args.max_cycle_growth_gb
+            ),
+        ),
+        reserve_mb=(
+            settings.storage_worker_reserve_mb
+            if args.storage_worker_reserve_mb is None
+            else args.storage_worker_reserve_mb
+        ),
+    )
     jobs = _load_stale_jobs(session_factory, limit=args.limit, ticker=args.ticker)
     print(
         f"stale_core_report_jobs={len(jobs)} workers={args.workers} "
@@ -300,6 +397,7 @@ def main() -> int:
                 "session_factory": session_factory,
                 "shared_limiter": shared_limiter,
                 "refresh_facts": not args.skip_companyfacts,
+                "storage_gate": storage_gate,
             },
             daemon=True,
         )
@@ -321,7 +419,9 @@ def main() -> int:
         f"reports={counters.reports} "
         f"strategy={counters.strategy} "
         f"errors={counters.errors} "
-        f"remaining_stale={remaining}",
+        f"remaining_stale={remaining} "
+        f"storage_limited={storage_gate.stop_reason is not None} "
+        f"storage_limit_reason={storage_gate.stop_reason or 'none'}",
         flush=True,
     )
     engine.dispose()

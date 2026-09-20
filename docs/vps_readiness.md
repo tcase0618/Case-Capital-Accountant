@@ -45,6 +45,28 @@ Safe options:
 
 For a 50 GB VPS, backups must be pulled off-host or stored in external object storage. Keeping full database backups on the same 50 GB disk defeats the deployment.
 
+## Storage Governor
+
+The production scheduler enforces a bounded live-data policy. The recommended 50 GB values are in `.env.production.example`:
+
+- `ACCOUNTANT_STORAGE_MAX_DATABASE_GB=14`
+- `ACCOUNTANT_STORAGE_MIN_FREE_DISK_GB=25`
+- `ACCOUNTANT_STORAGE_MAX_CYCLE_GROWTH_GB=1`
+- `ACCOUNTANT_STORAGE_WORKER_RESERVE_MB=128`
+
+Before a maintenance cycle, the scheduler checks the database and free disk space. During CompanyFacts refresh, each worker reserves a small amount of space before it starts another company. When the database cap, free-space reserve, or cycle-growth cap is reached, new work is deferred safely and the automation summary records the reason.
+
+This governor protects the VPS; it does not authorize deletion of immutable `raw_facts`. Moving raw facts off the VPS requires a verified archive export and a provenance-preserving schema refactor first.
+
+## SEC Polling And Rebuild Path
+
+The scheduler polls every 15 minutes during the two EDGAR filing windows configured in `.env.production`:
+
+- `06:00-09:30` Eastern: pre-market and opening window.
+- `16:00-22:00` Eastern: post-market filing window.
+
+It sleeps until the next window outside those periods. Each active cycle imports filing metadata since the latest persisted filing. New core financial filings refresh CompanyFacts/raw facts, canonical mappings, statement snapshots, report cards, bottlenecks, research lanes, and sector caches. New material event filings (`8-K`, late-filing notices, SEC correspondence, and amendments) also trigger a report refresh so event flags are not delayed until the next quarterly filing.
+
 ## First-Time VPS Setup
 
 ```bash

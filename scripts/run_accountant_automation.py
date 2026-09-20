@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
@@ -15,7 +16,7 @@ from typing import Any
 import psycopg
 
 from accountant.config import get_settings
-
+from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUTOMATION_DIR = REPO_ROOT / "artifacts" / "automation"
@@ -89,9 +90,42 @@ def main() -> int:
     summary_path = AUTOMATION_DIR / f"accountant_automation_{run_id}.json"
     settings = get_settings()
     dsn = settings.database_url.replace("postgresql+psycopg://", "postgresql://")
+    storage_budget = StorageBudget(
+        max_database_gb=settings.storage_max_database_gb,
+        min_free_disk_gb=settings.storage_min_free_disk_gb,
+        max_cycle_growth_gb=settings.storage_max_cycle_growth_gb,
+    )
 
     steps: list[StepResult] = []
     before = _database_snapshot(dsn)
+    storage_before = _storage_snapshot(dsn, settings.data_dir)
+    preflight = evaluate_storage_budget(
+        storage_budget,
+        database_bytes=storage_before["database_bytes"],
+        disk_free_bytes=storage_before["disk_free_bytes"],
+        cycle_start_database_bytes=storage_before["database_bytes"],
+    )
+    if not preflight.allowed:
+        payload = {
+            "run_id": run_id,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "before": before,
+            "after": before,
+            "delta": {"filings_estimate": 0, "report_cards": 0, "company_reports": 0},
+            "steps": [],
+            "storage": {
+                "before": storage_before,
+                "after": storage_before,
+                "blocked": True,
+                "reason": preflight.reason,
+            },
+            "readiness": {"stale_core_report_cards": None, "quality_stage_counts": {}},
+            "bottlenecks": {},
+        }
+        summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(json.dumps(payload, indent=2), flush=True)
+        # This is a controlled pause, not a failed ingestion or corrupt database.
+        return 0
 
     if not args.skip_import:
         command = [
@@ -148,6 +182,7 @@ def main() -> int:
     )
 
     after = _database_snapshot(dsn)
+    storage_after = _storage_snapshot(dsn, settings.data_dir)
     bottleneck_summary = _write_company_bottlenecks(dsn, run_id=run_id)
     readiness = _readiness_snapshot(dsn, stale_core_report_cards=_remaining_stale_from_logs(steps))
     payload = {
@@ -161,6 +196,17 @@ def main() -> int:
             "company_reports": after["company_reports_count"] - before["company_reports_count"],
         },
         "steps": [step.__dict__ for step in steps],
+        "storage": {
+            "before": storage_before,
+            "after": storage_after,
+            "blocked": False,
+            "reason": None,
+            "budget": {
+                "max_database_gb": settings.storage_max_database_gb,
+                "min_free_disk_gb": settings.storage_min_free_disk_gb,
+                "max_cycle_growth_gb": settings.storage_max_cycle_growth_gb,
+            },
+        },
         "readiness": readiness,
         "bottlenecks": bottleneck_summary,
     }
@@ -240,6 +286,21 @@ def _database_snapshot(dsn: str) -> dict[str, Any]:
     }
 
 
+def _storage_snapshot(dsn: str, data_dir: Path) -> dict[str, Any]:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("select pg_database_size(current_database())")
+        database_bytes = int(cur.fetchone()[0] or 0)
+    disk = shutil.disk_usage(data_dir)
+    return {
+        "database_bytes": database_bytes,
+        "database_gb": round(database_bytes / 1024**3, 3),
+        "disk_free_bytes": int(disk.free),
+        "disk_free_gb": round(disk.free / 1024**3, 3),
+        "disk_total_gb": round(disk.total / 1024**3, 3),
+    }
+
+
 def _table_estimates(cur: Any, table_names: list[str]) -> dict[str, int]:
     cur.execute(
         """
@@ -302,7 +363,7 @@ def _write_company_bottlenecks(dsn: str, *, run_id: str) -> dict[str, Any]:
             """
         )
         columns = [desc.name for desc in cur.description]
-        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        rows = [dict(zip(columns, row, strict=False)) for row in cur.fetchall()]
 
     csv_path = AUTOMATION_DIR / f"{run_id}_company_bottlenecks.csv"
     family_counts: Counter[str] = Counter()
