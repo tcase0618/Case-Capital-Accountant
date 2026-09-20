@@ -1479,6 +1479,7 @@ function CommandCenterPage() {
   const [cacheStatus, setCacheStatus] = useState(null);
   const [bottleneckSummary, setBottleneckSummary] = useState(null);
   const [sourceIntegrity, setSourceIntegrity] = useState(null);
+  const [operatingMode, setOperatingMode] = useState(null);
   const [workerCompanies, setWorkerCompanies] = useState({});
   const rateSamplesRef = useRef([]);
   const lastRateKeyRef = useRef(null);
@@ -1488,11 +1489,12 @@ function CommandCenterPage() {
     let cancelled = false;
 
     const loadStatus = async () => {
-      const [reportResult, cacheResult, bottleneckResult, sourceResult] = await Promise.allSettled([
+      const [reportResult, cacheResult, bottleneckResult, sourceResult, modeResult] = await Promise.allSettled([
         api.reportMachineStatus(),
         api.cacheStatus(),
         api.bottleneckSummary(),
-        api.sourceIntegrity()
+        api.sourceIntegrity(),
+        api.operatingMode()
       ]);
       if (cancelled) {
         return;
@@ -1540,6 +1542,9 @@ function CommandCenterPage() {
       }
       if (sourceResult.status === "fulfilled") {
         setSourceIntegrity(sourceResult.value);
+      }
+      if (modeResult.status === "fulfilled") {
+        setOperatingMode(modeResult.value);
       }
       if (reportResult.status === "rejected" && cacheResult.status === "rejected") {
         setCacheStatus((current) => current);
@@ -1633,6 +1638,8 @@ function CommandCenterPage() {
       />
 
       <DataTransferBar stats={stats} />
+
+      <OperatingModePanel mode={operatingMode} />
 
       <WorkerTickerBar
         reportStatus={reportStatus}
@@ -1757,6 +1764,26 @@ function CommandCenterPage() {
         </Card>
       </div>
     </div>
+  );
+}
+
+function OperatingModePanel({ mode }) {
+  if (!mode) {
+    return null;
+  }
+  const color = mode.mode === "standalone_research" ? "#60a5fa" : mode.mode === "terminal_handoff" ? "#c8a84b" : "#5eead4";
+  return (
+    <Card title="ACCOUNTANT AUTHORITY // DEPLOYMENT GATE" accentColor={color}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
+        <MiniMetric k="OPERATING MODE" v={String(mode.mode || "UNKNOWN").replaceAll("_", " ").toUpperCase()} color={color} />
+        <MiniMetric k="AUTHORITY" v={mode.execution_allowed ? "EXECUTION" : "RESEARCH ONLY"} color={mode.execution_allowed ? "#f87171" : "#4ade80"} />
+        <MiniMetric k="TERMINAL HANDOFF" v={mode.terminal_handoff_allowed ? "ENABLED" : "ISOLATED"} color={mode.terminal_handoff_allowed ? "#5eead4" : "#60a5fa"} />
+        <MiniMetric k="NEXT PHASE" v={String(mode.next_mode || "FINAL").replaceAll("_", " ").toUpperCase()} color={labelLight} />
+      </div>
+      <div style={{ color: muted, fontSize: 10, lineHeight: 1.5, marginTop: 10 }}>
+        {mode.authority}. Execution authority remains blocked inside the Accountant by design.
+      </div>
+    </Card>
   );
 }
 

@@ -73,6 +73,7 @@ export const api = {
   reports: () => request("/api/reports"),
   bottleneckSummary: () => request("/api/bottlenecks/summary"),
   sourceIntegrity: () => request("/api/source-integrity"),
+  operatingMode: () => request("/api/operating-mode"),
   sectors: () => request("/api/sectors"),
   sectorProfile: (sectorSlug) => request(`/api/sectors/${encodeURIComponent(sectorSlug)}`),
   subSectorProfile: (sectorSlug, subSectorSlug) =>

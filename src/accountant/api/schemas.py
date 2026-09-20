@@ -319,6 +319,20 @@ class AccountantIntegrationStatusResponse(BaseModel):
     companies_with_report_cards: int = 0
     companies_with_canonical_facts: int = 0
     companies_with_statement_snapshots: int = 0
+    operating_mode: str = "standalone_research"
+    terminal_handoff_allowed: bool = False
+    execution_allowed: bool = False
+
+
+class OperatingModeResponse(BaseModel):
+    mode: str
+    authority: str
+    research_only: bool
+    terminal_handoff_allowed: bool
+    execution_allowed: bool
+    next_mode: str | None = None
+    required_gates: list[str]
+    policy_version: str
 
 
 class AccountantIntegrationTickerResponse(BaseModel):

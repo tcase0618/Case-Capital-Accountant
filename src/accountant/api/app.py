@@ -40,6 +40,7 @@ from accountant.api.schemas import (
     HistoricalSnapshotResponse,
     IntegrationStatusResponse,
     MarketQuoteResponse,
+    OperatingModeResponse,
     PaperBookPositionResponse,
     PaperBookSummaryResponse,
     RawFactResponse,
@@ -88,6 +89,7 @@ from accountant.research.buy_board import (
 )
 from accountant.research.cache_warmer import CACHE_WARMER
 from accountant.research.change_timeline import build_company_change_timeline
+from accountant.research.operating_mode import operating_mode_payload
 from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
 from accountant.research.report_machine import MACHINE
@@ -1296,6 +1298,11 @@ def get_company_market_quote(ticker: str) -> MarketQuoteResponse:
     return MarketQuoteResponse(**ibkr_quote(ticker))
 
 
+@app.get("/api/operating-mode", response_model=OperatingModeResponse)
+def get_operating_mode() -> OperatingModeResponse:
+    return OperatingModeResponse(**operating_mode_payload(get_settings()))
+
+
 @app.get("/api/reports", response_model=list[CompanyReportResponse])
 def list_reports(
     session: SessionDep,
@@ -1597,6 +1604,7 @@ def report_machine_status() -> ReportMachineStatusResponse:
 @app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse)
 def accountant_integration_status(session: SessionDep) -> AccountantIntegrationStatusResponse:
     machine = MACHINE.snapshot()
+    mode = operating_mode_payload(get_settings())
     bind = session.get_bind()
     use_background_metrics = _should_use_background_dashboard_metrics(str(bind.url))
     metrics = _ensure_dashboard_metrics_refresh() if use_background_metrics else {
@@ -1632,6 +1640,9 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         companies_with_report_cards=companies_with_report_cards,
         companies_with_canonical_facts=int(metrics.get("companies_with_canonical_facts") or 0),
         companies_with_statement_snapshots=int(metrics.get("companies_with_statement_snapshots") or 0),
+        operating_mode=str(mode["mode"]),
+        terminal_handoff_allowed=bool(mode["terminal_handoff_allowed"]),
+        execution_allowed=False,
     )
 
 

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     data_dir: Path = Field(default=Path("./data"))
     market_data_mode: str = Field(default="research_only")
+    operating_mode: str = Field(default="standalone_research", validation_alias="ACCOUNTANT_OPERATING_MODE")
     ibkr_enabled: bool = Field(default=False)
     ibkr_host: str = Field(default="127.0.0.1")
     ibkr_port: int = Field(default=7497)
@@ -77,6 +78,12 @@ class Settings(BaseSettings):
     def _normalize_market_data_mode(cls, value: str) -> str:
         normalized = value.strip().lower()
         return normalized or "research_only"
+
+    @field_validator("operating_mode")
+    @classmethod
+    def _normalize_operating_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        return normalized or "standalone_research"
 
     @field_validator("data_dir", mode="before")
     @classmethod

@@ -30,6 +30,18 @@ def _session_override(test_session):
     return _override
 
 
+def test_operating_mode_is_research_only_by_default() -> None:
+    client = TestClient(app)
+    response = client.get("/api/operating-mode")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mode"] == "standalone_research"
+    assert payload["research_only"] is True
+    assert payload["execution_allowed"] is False
+    assert payload["terminal_handoff_allowed"] is False
+
+
 def test_report_card_anchor_ignores_ownership_forms() -> None:
     latest = _latest_report_card_filing(
         [
