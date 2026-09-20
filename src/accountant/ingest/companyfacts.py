@@ -177,6 +177,7 @@ def ingest_company_facts_payload(
     facts_inserted = 0
     facts_skipped = 0
     errors: list[str] = []
+    seen_fact_hashes: set[str] = set()
 
     facts_root = facts_data.get("facts", facts_data)
     for taxonomy, concepts in facts_root.items():
@@ -211,6 +212,7 @@ def ingest_company_facts_payload(
                             description=description,
                             unit=unit,
                             fact_dict=fact,
+                            seen_fact_hashes=seen_fact_hashes,
                         )
                         if inserted:
                             facts_inserted += 1
@@ -235,6 +237,7 @@ def _ingest_single_fact(
     description: str | None,
     unit: str,
     fact_dict: dict[str, Any],
+    seen_fact_hashes: set[str] | None = None,
 ) -> bool:
     """Ingest a single fact from CompanyFacts.
 
@@ -318,8 +321,14 @@ def _ingest_single_fact(
         value=value or "none",
     )
 
+    if seen_fact_hashes is not None and fact_hash in seen_fact_hashes:
+        return False
+    if seen_fact_hashes is not None:
+        seen_fact_hashes.add(fact_hash)
+
     # Check for duplicate
-    existing = session.query(RawFact).filter(RawFact.fact_hash == fact_hash).first()
+    with session.no_autoflush:
+        existing = session.query(RawFact).filter(RawFact.fact_hash == fact_hash).first()
     if existing:
         return False  # Duplicate, skip
 
