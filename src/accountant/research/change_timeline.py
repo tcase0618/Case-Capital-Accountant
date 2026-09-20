@@ -27,7 +27,13 @@ _EVENT_FLAGS = (
 
 def build_company_change_timeline(cards: Iterable[ReportCard], *, limit: int = 80) -> dict[str, object] | None:
     """Return material, auditable report-card changes in chronological order."""
-    ordered = sorted(cards, key=_card_time)
+    # A Form 4, for example, can update ownership evidence but must not be
+    # portrayed as a full accounting-report revaluation. The calendar is only
+    # for financial statements and explicitly material SEC event forms.
+    ordered = sorted(
+        (card for card in cards if card.filing_type.upper() in (_CORE_FORMS | _MATERIAL_EVENT_FORMS)),
+        key=_card_time,
+    )
     if not ordered:
         return None
 

@@ -716,7 +716,19 @@ def test_company_change_timeline_returns_filing_deltas_and_source_link(test_sess
         },
         **{key: value for key, value in base.items() if key not in {"growth_trend_deltas", "event_red_flags"}},
     )
-    test_session.add_all([first, second])
+    ownership_form = ReportCard(
+        id=uuid.uuid4(),
+        report_card_id="0000320193_4_unknown-period_2025-08-15",
+        filing_type="4",
+        period_of_report=None,
+        filed_date=date(2025, 8, 15),
+        accepted_at=datetime(2025, 8, 15, 17, 0, 0),
+        accession_number="0000320193-25-000103",
+        market_data_linkage={"price_asof": 200.0},
+        final_verdict={"grade": "F", "grade_score": 10.0, "current_action": "EXIT"},
+        **base,
+    )
+    test_session.add_all([first, second, ownership_form])
     test_session.commit()
 
     app.dependency_overrides[get_session] = _session_override(test_session)
