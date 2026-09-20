@@ -2,6 +2,7 @@
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = "004"
@@ -14,8 +15,8 @@ def upgrade() -> None:
     # Create financial_periods table
     op.create_table(
         "financial_periods",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("company_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("period_type", sa.String(32), nullable=False),
         sa.Column("fiscal_year", sa.Integer(), nullable=True),
         sa.Column("fiscal_quarter", sa.Integer(), nullable=True),

@@ -2,6 +2,7 @@
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = "003"
@@ -14,7 +15,7 @@ def upgrade() -> None:
     # Create canonical_concepts table
     op.create_table(
         "canonical_concepts",
-        sa.Column("id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("code", sa.String(64), nullable=False),
         sa.Column("label", sa.String(255), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
@@ -32,8 +33,8 @@ def upgrade() -> None:
     # Create canonical_mappings table
     op.create_table(
         "canonical_mappings",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("canonical_concept_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("canonical_concept_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("taxonomy", sa.String(64), nullable=False),
         sa.Column("source_concept", sa.String(255), nullable=False),
         sa.Column("priority", sa.Integer(), nullable=False),
@@ -61,10 +62,10 @@ def upgrade() -> None:
     # Create canonical_facts table
     op.create_table(
         "canonical_facts",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("company_id", sa.String(36), nullable=False),
-        sa.Column("raw_fact_id", sa.String(36), nullable=False),
-        sa.Column("canonical_concept_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("raw_fact_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("canonical_concept_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("value", sa.String(1024), nullable=True),
         sa.Column("value_numeric", sa.Numeric(precision=20, scale=4), nullable=True),
         sa.Column("unit", sa.String(32), nullable=True),

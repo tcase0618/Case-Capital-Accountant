@@ -1,5 +1,6 @@
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 """Create research_records table.
 
@@ -21,8 +22,8 @@ def upgrade() -> None:
     """Create research_records table with all fields."""
     op.create_table(
         "research_records",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("company_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("as_of_date", sa.String(10), nullable=False),
         sa.Column("classification", sa.String(64), nullable=False),
         sa.Column("classification_confidence", sa.Float(), nullable=True),

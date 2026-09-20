@@ -5,24 +5,24 @@ Revises:
 Create Date: 2026-01-01 00:00:00.000000
 
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "001_initial_schema"
-down_revision: Union[str, None] = None
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = None
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
     # Create companies table
     op.create_table(
         "companies",
-        sa.Column("id", sa.CHAR(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("cik", sa.String(10), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column("entity_type", sa.String(64), nullable=True),
@@ -41,8 +41,8 @@ def upgrade() -> None:
     # Create securities table
     op.create_table(
         "securities",
-        sa.Column("id", sa.CHAR(36), nullable=False),
-        sa.Column("company_id", sa.CHAR(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("ticker", sa.String(16), nullable=False),
         sa.Column("exchange", sa.String(32), nullable=True),
         sa.Column("cusip", sa.String(16), nullable=True),
@@ -60,8 +60,8 @@ def upgrade() -> None:
     # Create filings table
     op.create_table(
         "filings",
-        sa.Column("id", sa.CHAR(36), nullable=False),
-        sa.Column("company_id", sa.CHAR(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("accession_number", sa.String(24), nullable=False),
         sa.Column("form_type", sa.String(32), nullable=False),
         sa.Column("filing_date", sa.Date(), nullable=False),
@@ -92,8 +92,8 @@ def upgrade() -> None:
     # Create filing_documents table
     op.create_table(
         "filing_documents",
-        sa.Column("id", sa.CHAR(36), nullable=False),
-        sa.Column("filing_id", sa.CHAR(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("filing_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=True),
         sa.Column("document_name", sa.String(255), nullable=False),
         sa.Column("document_type", sa.String(64), nullable=True),
@@ -110,9 +110,9 @@ def upgrade() -> None:
     # Create raw_facts table
     op.create_table(
         "raw_facts",
-        sa.Column("id", sa.CHAR(36), nullable=False),
-        sa.Column("filing_id", sa.CHAR(36), nullable=False),
-        sa.Column("company_id", sa.CHAR(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("filing_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("concept", sa.String(255), nullable=False),
         sa.Column("taxonomy", sa.String(64), nullable=True),
         sa.Column("unit", sa.String(64), nullable=True),

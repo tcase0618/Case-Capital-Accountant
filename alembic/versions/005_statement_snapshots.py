@@ -2,6 +2,7 @@
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "005"
 down_revision = "004"
@@ -14,8 +15,8 @@ def upgrade() -> None:
     # Create statement_snapshots table
     op.create_table(
         "statement_snapshots",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("company_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("statement_type", sa.String(32), nullable=False),
         sa.Column("fiscal_year", sa.Integer(), nullable=False),
         sa.Column("fiscal_quarter", sa.Integer(), nullable=True),
@@ -33,7 +34,7 @@ def upgrade() -> None:
         sa.Column("warnings", sa.JSON(), nullable=True),
         sa.Column("quality_notes", sa.Text(), nullable=True),
         sa.Column("is_restated", sa.Boolean(), nullable=False),
-        sa.Column("restated_by_snapshot_id", sa.String(36), nullable=True),
+        sa.Column("restated_by_snapshot_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("originally_reported", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
@@ -59,17 +60,17 @@ def upgrade() -> None:
     # Create statement_lines table
     op.create_table(
         "statement_lines",
-        sa.Column("id", sa.String(36), nullable=False),
-        sa.Column("snapshot_id", sa.String(36), nullable=False),
-        sa.Column("company_id", sa.String(36), nullable=False),
+        sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("snapshot_id", postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column("company_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("canonical_concept", sa.String(64), nullable=False),
-        sa.Column("canonical_concept_id", sa.String(36), nullable=True),
+        sa.Column("canonical_concept_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("value_numeric", sa.Float(), nullable=True),
         sa.Column("value_text", sa.String(1024), nullable=True),
         sa.Column("unit", sa.String(32), nullable=True),
-        sa.Column("canonical_fact_id", sa.String(36), nullable=True),
-        sa.Column("raw_fact_id", sa.String(36), nullable=True),
-        sa.Column("filing_id", sa.String(36), nullable=True),
+        sa.Column("canonical_fact_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("raw_fact_id", postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column("filing_id", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("accession_number", sa.String(24), nullable=True),
         sa.Column("raw_taxonomy", sa.String(64), nullable=True),
         sa.Column("raw_concept", sa.String(255), nullable=True),
