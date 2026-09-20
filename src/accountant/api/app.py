@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -21,6 +21,8 @@ from accountant.api.schemas import (
     AccountantIntegrationTickerResponse,
     ActionResultResponse,
     AvailableStatementResponse,
+    BottleneckSummaryResponse,
+    CompanyBottleneckSnapshotResponse,
     BuyBoardCandidateResponse,
     BuyBoardStatusResponse,
     CacheWarmStatusResponse,
@@ -37,11 +39,17 @@ from accountant.api.schemas import (
     HistoricalSnapshotResponse,
     IntegrationStatusResponse,
     MarketQuoteResponse,
+    PaperBookPositionResponse,
+    PaperBookSummaryResponse,
     RawFactResponse,
     ReportCardResponse,
     ReportMachineStatusResponse,
     ResearchRecordResponse,
+    SectorProfileResponse,
+    SectorSummaryResponse,
+    SourceIntegrityResponse,
     StatementSnapshotResponse,
+    SubSectorProfileResponse,
     TaxonomyConceptResponse,
     UniverseImportRequest,
     UniverseImportResponse,
@@ -53,8 +61,10 @@ from accountant.db.models import (
     CanonicalConcept,
     CanonicalFact,
     Company,
+    CompanyBottleneckSnapshot,
     CompanyReport,
     Filing,
+    PaperBookPosition,
     RawFact,
     ReportCard,
     ResearchRecord,
@@ -74,9 +84,13 @@ from accountant.research.buy_board import (
     _upside_pct,
     future_upside_candidates,
 )
+from accountant.research.bottleneck_engine import bottleneck_summary_from_cache
 from accountant.research.cache_warmer import CACHE_WARMER
+from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
 from accountant.research.report_machine import MACHINE
+from accountant.research.source_integrity import build_source_integrity_snapshot
+from accountant.research.sector_intelligence import list_sector_summaries, sector_profile, sub_sector_profile
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
 from accountant.sec.exceptions import SecConfigError
@@ -717,9 +731,14 @@ def get_company_facts(
     if form:
         stmt = stmt.where(RawFact.form == form)
 
-    stmt = stmt.order_by(RawFact.period_end.desc(), RawFact.created_at.desc()).limit(limit)
+    stmt = stmt.order_by(
+        RawFact.period_end.desc(),
+        RawFact.accepted_at.desc().nullslast(),
+        RawFact.filed_date.desc().nullslast(),
+        RawFact.created_at.desc(),
+    ).limit(limit)
     facts = session.execute(stmt).scalars().all()
-    return [RawFactResponse.model_validate(fact) for fact in facts]
+    return [_raw_fact_response(fact) for fact in facts]
 
 
 @app.get("/api/companies/{ticker}/facts", response_model=list[RawFactResponse])
@@ -744,19 +763,19 @@ def api_get_company_facts(
 @app.get("/api/dashboard", response_model=DashboardResponse)
 def get_dashboard(session: SessionDep) -> DashboardResponse:
     bind = session.get_bind()
-    fast_totals = _fast_dashboard_totals(session)
     use_background_fact_totals = _should_use_background_fact_totals(str(bind.url))
-    metrics_cache = _ensure_dashboard_metrics_refresh()
-    fact_totals = _ensure_dashboard_fact_totals_refresh() if use_background_fact_totals else {}
     use_background_metrics = _should_use_background_dashboard_metrics(str(bind.url))
+    metrics_cache = _ensure_dashboard_metrics_refresh() if use_background_metrics else {}
+    fact_totals = _ensure_dashboard_fact_totals_refresh() if use_background_fact_totals else {}
+    fast_totals = _fast_dashboard_totals(session) if not use_background_metrics else {}
     stats = DashboardStatsResponse(
-        total_companies=int(metrics_cache.get("total_companies") or fast_totals["total_companies"]) if use_background_metrics else fast_totals["total_companies"],
-        total_filings=int(metrics_cache.get("total_filings") or fast_totals["total_filings"]) if use_background_metrics else fast_totals["total_filings"],
+        total_companies=int(metrics_cache.get("total_companies") or 0) if use_background_metrics else fast_totals["total_companies"],
+        total_filings=int(metrics_cache.get("total_filings") or 0) if use_background_metrics else fast_totals["total_filings"],
         total_raw_facts=(
             int(fact_totals.get("total_raw_facts") or 0)
             if use_background_fact_totals
             else (
-                int(metrics_cache.get("total_raw_facts") or fast_totals["total_raw_facts"])
+                int(metrics_cache.get("total_raw_facts") or 0)
                 if use_background_metrics
                 else fast_totals["total_raw_facts"]
             )
@@ -765,13 +784,13 @@ def get_dashboard(session: SessionDep) -> DashboardResponse:
             int(fact_totals.get("total_canonical_facts") or 0)
             if use_background_fact_totals
             else (
-                int(metrics_cache.get("total_canonical_facts") or fast_totals["total_canonical_facts"])
+                int(metrics_cache.get("total_canonical_facts") or 0)
                 if use_background_metrics
                 else fast_totals["total_canonical_facts"]
             )
         ),
-        total_statement_snapshots=int(metrics_cache.get("total_statement_snapshots") or fast_totals["total_statement_snapshots"]) if use_background_metrics else fast_totals["total_statement_snapshots"],
-        total_research_records=int(metrics_cache.get("total_research_records") or fast_totals["total_research_records"]) if use_background_metrics else fast_totals["total_research_records"],
+        total_statement_snapshots=int(metrics_cache.get("total_statement_snapshots") or 0) if use_background_metrics else fast_totals["total_statement_snapshots"],
+        total_research_records=int(metrics_cache.get("total_research_records") or 0) if use_background_metrics else fast_totals["total_research_records"],
         companies_with_filings=int(metrics_cache.get("companies_with_filings") or 0) if use_background_metrics else _exists_company_count(session, Filing),
         companies_with_raw_facts=int(metrics_cache.get("companies_with_raw_facts") or 0) if use_background_metrics else _exists_company_count(session, RawFact),
         companies_with_canonical_facts=int(metrics_cache.get("companies_with_canonical_facts") or 0) if use_background_metrics else _exists_company_count(session, CanonicalFact),
@@ -1303,6 +1322,80 @@ def list_reports(
     ]
 
 
+def _bottleneck_response(row: CompanyBottleneckSnapshot) -> CompanyBottleneckSnapshotResponse:
+    return CompanyBottleneckSnapshotResponse(
+        ticker=row.ticker,
+        company_name=row.company_name,
+        sic=row.sic,
+        sic_description=row.sic_description,
+        focus_family=row.focus_family,
+        model_family=row.model_family,
+        model_family_reason=row.model_family_reason,
+        stance=row.stance,
+        score=row.score,
+        model_family_score=row.model_family_score,
+        data_quality_tier=row.data_quality_tier,
+        latest_filing_date=row.latest_filing_date,
+        bottlenecks=list(row.bottlenecks or []),
+        management_bottlenecks=list(row.management_bottlenecks or []),
+        source=row.source,
+        updated_at=row.updated_at.isoformat() if row.updated_at else None,
+    )
+
+
+@app.get("/api/bottlenecks", response_model=list[CompanyBottleneckSnapshotResponse])
+def list_bottlenecks(
+    session: SessionDep,
+    focus_family: str | None = Query(default=None),
+    model_family: str | None = Query(default=None),
+    limit: int = Query(default=250, ge=1, le=1000),
+) -> list[CompanyBottleneckSnapshotResponse]:
+    query = select(CompanyBottleneckSnapshot)
+    if focus_family:
+        query = query.where(CompanyBottleneckSnapshot.focus_family == focus_family)
+    if model_family:
+        query = query.where(CompanyBottleneckSnapshot.model_family == model_family)
+    rows = session.execute(
+        query.order_by(
+            CompanyBottleneckSnapshot.model_family_score.asc().nullslast(),
+            CompanyBottleneckSnapshot.score.asc().nullslast(),
+            CompanyBottleneckSnapshot.ticker.asc(),
+        ).limit(limit)
+    ).scalars().all()
+    return [_bottleneck_response(row) for row in rows]
+
+
+@app.get("/api/bottlenecks/summary", response_model=BottleneckSummaryResponse)
+def bottleneck_summary(session: SessionDep) -> BottleneckSummaryResponse:
+    return BottleneckSummaryResponse(**bottleneck_summary_from_cache(session))
+
+
+@app.get("/api/source-integrity", response_model=SourceIntegrityResponse)
+def source_integrity(session: SessionDep) -> SourceIntegrityResponse:
+    return SourceIntegrityResponse(**build_source_integrity_snapshot(session))
+
+
+@app.get("/api/sectors", response_model=list[SectorSummaryResponse])
+def list_sectors(session: SessionDep) -> list[SectorSummaryResponse]:
+    return [SectorSummaryResponse(**row) for row in list_sector_summaries(session)]
+
+
+@app.get("/api/sectors/{sector_slug}", response_model=SectorProfileResponse)
+def get_sector_profile(sector_slug: str, session: SessionDep) -> SectorProfileResponse:
+    profile = sector_profile(session, sector_slug)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Sector not found")
+    return SectorProfileResponse(**profile)
+
+
+@app.get("/api/sectors/{sector_slug}/subsectors/{sub_sector_slug}", response_model=SubSectorProfileResponse)
+def get_sub_sector_profile(sector_slug: str, sub_sector_slug: str, session: SessionDep) -> SubSectorProfileResponse:
+    profile = sub_sector_profile(session, sector_slug, sub_sector_slug)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Sub-sector not found")
+    return SubSectorProfileResponse(**profile)
+
+
 def _report_card_response(row: ReportCard) -> ReportCardResponse:
     return ReportCardResponse(
         ticker=row.ticker,
@@ -1339,6 +1432,57 @@ def _report_card_response(row: ReportCard) -> ReportCardResponse:
     )
 
 
+def _raw_fact_response(row: RawFact) -> RawFactResponse:
+    return RawFactResponse(
+        id=row.id,
+        company_id=row.company_id,
+        accession_number=row.accession_number,
+        concept=row.concept,
+        taxonomy=row.taxonomy,
+        unit=row.unit,
+        period_start=row.period_start,
+        period_end=row.period_end,
+        instant_date=row.instant_date,
+        value_numeric=row.value_numeric,
+        value_text=row.value_text,
+        accepted_at=row.accepted_at.isoformat() if row.accepted_at else None,
+        form=row.form,
+        filed_date=row.filed_date,
+        fiscal_year=row.fiscal_year,
+        fiscal_period=row.fiscal_period,
+        frame=row.frame,
+        lineage_hash=row.lineage_hash,
+        lineage_version=row.lineage_version,
+        prior_version_fact_id=row.prior_version_fact_id,
+        first_reported_at=row.first_reported_at.isoformat() if row.first_reported_at else None,
+        first_reported_accession_number=row.first_reported_accession_number,
+        is_amendment_fact=row.is_amendment_fact,
+        label=row.label,
+        description=row.description,
+        source_type=row.source_type,
+    )
+
+
+def _paper_book_position_response(row: PaperBookPosition) -> PaperBookPositionResponse:
+    return PaperBookPositionResponse(
+        id=row.id,
+        book_name=row.book_name,
+        launch_date=row.launch_date.isoformat(),
+        lane=row.lane,
+        route_family=row.route_family,
+        route_reason=row.route_reason,
+        ticker=row.ticker,
+        company_name=row.company_name,
+        report_card_id=row.report_card_id,
+        entry_price=row.entry_price,
+        target_weight=row.target_weight,
+        status=row.status,
+        thesis_snapshot=dict(row.thesis_snapshot or {}),
+        notes=row.notes,
+        created_at=row.created_at.isoformat() if row.created_at else None,
+    )
+
+
 @app.get("/api/report-cards/latest", response_model=list[ReportCardResponse])
 def list_latest_report_cards(
     session: SessionDep,
@@ -1355,6 +1499,73 @@ def get_latest_report_card(session: SessionDep, ticker: str) -> ReportCardRespon
     return _report_card_response(row)
 
 
+@app.post("/api/paper-books/lane1/launch", response_model=ActionResultResponse)
+def launch_lane1_book(
+    session: SessionDep,
+    launch_date: str | None = Query(default=None),
+    size: int = Query(default=20, ge=1, le=200),
+    book_name: str | None = Query(default=None),
+) -> ActionResultResponse:
+    resolved_launch_date = date.fromisoformat(launch_date) if launch_date else datetime.now(UTC).date()
+    result = launch_lane1_paper_book(
+        session,
+        launch_date=resolved_launch_date,
+        size=size,
+        book_name=book_name,
+    )
+    session.commit()
+    return ActionResultResponse(
+        status="ok",
+        message=f"Lane 1 paper book launched: {result.book_name}",
+        details={
+            "book_name": result.book_name,
+            "launch_date": result.launch_date.isoformat(),
+            "selected": result.selected,
+            "skipped_existing": result.skipped_existing,
+        },
+    )
+
+
+@app.get("/api/paper-books", response_model=list[PaperBookSummaryResponse])
+def list_paper_books(session: SessionDep) -> list[PaperBookSummaryResponse]:
+    rows = session.execute(
+        select(PaperBookPosition).order_by(PaperBookPosition.created_at.desc(), PaperBookPosition.book_name.asc())
+    ).scalars().all()
+    grouped: dict[str, list[PaperBookPosition]] = {}
+    for row in rows:
+        grouped.setdefault(row.book_name, []).append(row)
+    summaries = []
+    for book_name, positions in grouped.items():
+        weights = [float(row.target_weight) for row in positions if row.target_weight is not None]
+        first = sorted(positions, key=lambda row: row.created_at.isoformat() if row.created_at else "")[0]
+        summaries.append(
+            PaperBookSummaryResponse(
+                book_name=book_name,
+                launch_date=min(row.launch_date for row in positions).isoformat() if positions else None,
+                lane=first.lane,
+                position_count=len(positions),
+                open_count=sum(1 for row in positions if row.status == "OPEN"),
+                avg_target_weight=round(sum(weights) / len(weights), 6) if weights else None,
+                created_at=first.created_at.isoformat() if first.created_at else None,
+            )
+        )
+    return sorted(
+        summaries,
+        key=lambda item: item.created_at or "",
+        reverse=True,
+    )
+
+
+@app.get("/api/paper-books/{book_name}", response_model=list[PaperBookPositionResponse])
+def list_paper_book(book_name: str, session: SessionDep) -> list[PaperBookPositionResponse]:
+    rows = session.execute(
+        select(PaperBookPosition)
+        .where(PaperBookPosition.book_name == book_name)
+        .order_by(PaperBookPosition.target_weight.desc(), PaperBookPosition.ticker.asc())
+    ).scalars().all()
+    return [_paper_book_position_response(row) for row in rows]
+
+
 @app.get("/api/reports/status", response_model=ReportMachineStatusResponse)
 def report_machine_status() -> ReportMachineStatusResponse:
     return ReportMachineStatusResponse(**MACHINE.snapshot())
@@ -1363,7 +1574,13 @@ def report_machine_status() -> ReportMachineStatusResponse:
 @app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse)
 def accountant_integration_status(session: SessionDep) -> AccountantIntegrationStatusResponse:
     machine = MACHINE.snapshot()
-    metrics = _ensure_dashboard_metrics_refresh()
+    bind = session.get_bind()
+    use_background_metrics = _should_use_background_dashboard_metrics(str(bind.url))
+    metrics = _ensure_dashboard_metrics_refresh() if use_background_metrics else {
+        "companies_with_reports": _exists_company_count(session, CompanyReport),
+        "companies_with_canonical_facts": _exists_company_count(session, CanonicalFact),
+        "companies_with_statement_snapshots": _exists_company_count(session, StatementSnapshot),
+    }
     companies_with_report_cards = _exists_company_count(session, ReportCard)
     ready = (
         int(machine.get("runnable_companies") or 0) == 0
@@ -1377,7 +1594,7 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         else ("blocked" if int(machine.get("blocked_companies") or 0) > 0 else "processing")
     )
     return AccountantIntegrationStatusResponse(
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         ready_for_readonly_integration=ready,
         completion_state=completion_state,
         total_companies=int(machine.get("total_companies") or 0),
@@ -1414,7 +1631,7 @@ def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> Ac
     if report is not None and isinstance(report.key_stats, dict):
         future_bucket = report.key_stats.get("future_bucket")
     return AccountantIntegrationTickerResponse(
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         ticker=resolved_ticker,
         company_name=company.name,
         ready_for_readonly_integration=ready,

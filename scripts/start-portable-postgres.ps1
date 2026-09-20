@@ -52,6 +52,17 @@ if (-not (Test-Path $initdb)) {
     throw "Portable PostgreSQL binaries are missing: $initdb"
 }
 
+$pidFile = Join-Path $dataDir "postmaster.pid"
+if ((Test-Path $pidFile) -and -not (Test-PostgresPort)) {
+    $pidLines = Get-Content -Path $pidFile -ErrorAction SilentlyContinue
+    $stalePid = if ($pidLines) { $pidLines[0] } else { $null }
+    $staleProcess = if ($stalePid) { Get-Process -Id $stalePid -ErrorAction SilentlyContinue } else { $null }
+    if (-not $staleProcess) {
+        Remove-Item -LiteralPath $pidFile -Force
+        Write-Host "Removed stale PostgreSQL postmaster.pid"
+    }
+}
+
 $clusterAlreadyInitialized = Test-Path (Join-Path $dataDir "PG_VERSION")
 if (-not $clusterAlreadyInitialized) {
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null

@@ -30,6 +30,8 @@ class AccountingFactorPack:
     external_financing_ratio: float | None
     factor_quality_score: float | None
     factor_forensic_risk_score: float | None
+    a_his_score: float | None
+    a_his_breakdown: dict[str, float | bool | str | None] | None
     warnings: list[str]
     factor_version: str = "ACCOUNTING_FACTOR_PACK_V1"
 
@@ -52,6 +54,8 @@ def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
             external_financing_ratio=None,
             factor_quality_score=None,
             factor_forensic_risk_score=None,
+            a_his_score=None,
+            a_his_breakdown=None,
             warnings=["no annual periods available for factor computation"],
         )
 
@@ -83,6 +87,12 @@ def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
         net_operating_assets_ratio=noa_ratio,
         external_financing_ratio=external_financing_ratio,
     )
+    a_his_score, a_his_breakdown = _a_his_score(
+        current=current,
+        prior=prior,
+        beneish_m_score=beneish,
+        sloan_accrual_ratio=sloan,
+    )
     return AccountingFactorPack(
         period_label=_period_label(current),
         prior_period_label=_period_label(prior) if prior else None,
@@ -97,6 +107,8 @@ def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
         external_financing_ratio=_round(external_financing_ratio, 4),
         factor_quality_score=_round(factor_quality_score, 2),
         factor_forensic_risk_score=_round(factor_forensic_risk_score, 2),
+        a_his_score=_round(a_his_score, 2),
+        a_his_breakdown=a_his_breakdown,
         warnings=warnings,
     )
 
@@ -231,6 +243,21 @@ def _cash_from_ops(period: FactorPeriod | None) -> float | None:
     return _fact(period, ["NetCashProvidedByUsedInOperatingActivities"])
 
 
+def _capex(period: FactorPeriod | None) -> float | None:
+    value = _fact(period, ["PaymentsToAcquirePropertyPlantAndEquipment", "CapitalExpenditures"])
+    return abs(value) if value is not None else None
+
+
+def _dividends_paid(period: FactorPeriod | None) -> float | None:
+    value = _fact(period, ["PaymentsOfDividends", "PaymentsOfDividendsCommonStock", "DividendsPaid"])
+    return abs(value) if value is not None else None
+
+
+def _interest_expense(period: FactorPeriod | None) -> float | None:
+    value = _fact(period, ["InterestExpenseAndDebtExpense", "InterestExpense"])
+    return abs(value) if value is not None else None
+
+
 def _retained_earnings(period: FactorPeriod | None) -> float | None:
     return _fact(period, ["RetainedEarningsAccumulatedDeficit", "RetainedEarningsAppropriated"])
 
@@ -240,9 +267,9 @@ def _ebit(period: FactorPeriod | None) -> float | None:
     if operating_income is not None:
         return operating_income
     pretax = _fact(period, ["IncomeBeforeTaxExpenseBenefit"])
-    interest = _fact(period, ["InterestExpenseAndDebtExpense", "InterestExpense"])
+    interest = _interest_expense(period)
     if pretax is not None and interest is not None:
-        return pretax + abs(interest)
+        return pretax + interest
     return None
 
 
@@ -607,3 +634,151 @@ def _factor_forensic_risk_score(
     if not components:
         return None
     return sum(components) / len(components)
+
+
+def _a_his_score(
+    *,
+    current: FactorPeriod,
+    prior: FactorPeriod | None,
+    beneish_m_score: float | None,
+    sloan_accrual_ratio: float | None,
+) -> tuple[float | None, dict[str, float | bool | str | None] | None]:
+    """Ledger-style Accounting Health & Integrity Score from the PDF overlay.
+
+    The score is intentionally explainable and conservative: missing sections
+    receive no module points instead of fabricated passes.
+    """
+
+    revenue = _revenue(current)
+    revenue_prev = _revenue(prior)
+    net_income = _net_income(current)
+    net_income_prev = _net_income(prior)
+    cfo = _cash_from_ops(current)
+    assets = _total_assets(current)
+    assets_prev = _total_assets(prior)
+    equity = _book_equity(current)
+    equity_prev = _book_equity(prior)
+    liabilities = _total_liabilities(current)
+    current_assets = _current_assets(current)
+    current_liabilities = _current_liabilities(current)
+    cash = _cash(current) or 0.0
+    securities = _securities(current) or 0.0
+    receivables = _accounts_receivable(current) or 0.0
+    ebit = _ebit(current)
+    interest = _interest_expense(current)
+    capex = _capex(current)
+    dividends = _dividends_paid(current)
+
+    average_assets = _avg(assets, assets_prev) if prior else assets
+    average_equity = _avg(equity, equity_prev) if prior else equity
+    quality_of_earnings = _safe_divide(cfo, net_income)
+    revenue_growth_pct = _pct_change(revenue, revenue_prev) if prior else None
+    net_income_growth_pct = _pct_change(net_income, net_income_prev) if prior else None
+    profit_margin = _safe_divide(net_income, revenue)
+    asset_turnover = _safe_divide(revenue, average_assets)
+    roa = _safe_divide(net_income, average_assets)
+    roe = _safe_divide(net_income, average_equity)
+    current_ratio = _safe_divide(current_assets, current_liabilities)
+    quick_ratio = _safe_divide(cash + securities + receivables, current_liabilities)
+    debt_ratio = _safe_divide(liabilities, assets)
+    times_interest_earned = _safe_divide(ebit, interest)
+    cash_flow_need = None
+    if capex is not None or dividends is not None:
+        cash_flow_need = (capex or 0.0) + (dividends or 0.0)
+    ocf_covers_capex_dividends = cfo is not None and cash_flow_need is not None and cfo >= cash_flow_need
+
+    earnings_quality = _module_average(
+        _threshold_score(quality_of_earnings, pass_at=1.0, strong_at=1.5),
+        _inverse_threshold_score(beneish_m_score, pass_at=-2.22, strong_at=-2.8),
+        _inverse_abs_score(sloan_accrual_ratio, pass_at=0.08, strong_at=0.02),
+        max_points=25.0,
+    )
+    trend = _module_average(
+        _threshold_score(revenue_growth_pct, pass_at=0.0, strong_at=12.0),
+        _threshold_score(net_income_growth_pct, pass_at=0.0, strong_at=12.0),
+        max_points=20.0,
+    )
+    dupont = _module_average(
+        _threshold_score(roa, pass_at=0.08, strong_at=0.12),
+        _threshold_score(roe, pass_at=0.12, strong_at=0.18),
+        _threshold_score(profit_margin, pass_at=0.05, strong_at=0.15),
+        _threshold_score(asset_turnover, pass_at=0.5, strong_at=1.2),
+        max_points=20.0,
+    )
+    solvency_liquidity = _module_average(
+        _threshold_score(current_ratio, pass_at=1.5, strong_at=2.5),
+        _threshold_score(quick_ratio, pass_at=1.0, strong_at=1.5),
+        _inverse_threshold_score(debt_ratio, pass_at=0.5, strong_at=0.25),
+        _threshold_score(times_interest_earned, pass_at=3.0, strong_at=5.0),
+        max_points=20.0,
+    )
+    cash_capital = _module_average(
+        _boolean_score(ocf_covers_capex_dividends),
+        _threshold_score(cfo, pass_at=0.0, strong_at=max(abs(net_income or 0.0), 1.0)),
+        max_points=15.0,
+    )
+
+    modules = [earnings_quality, trend, dupont, solvency_liquidity, cash_capital]
+    if all(module is None for module in modules):
+        return None, None
+    score = sum(module or 0.0 for module in modules)
+    breakdown: dict[str, float | bool | str | None] = {
+        "earnings_quality_fraud_audit": _round(earnings_quality, 2),
+        "five_year_trend_screening": _round(trend, 2),
+        "dupont_profitability_roa": _round(dupont, 2),
+        "solvency_liquidity": _round(solvency_liquidity, 2),
+        "cash_flow_capital_allocation": _round(cash_capital, 2),
+        "quality_of_earnings": _round(quality_of_earnings, 3),
+        "current_ratio": _round(current_ratio, 3),
+        "quick_ratio": _round(quick_ratio, 3),
+        "debt_ratio": _round(debt_ratio, 3),
+        "times_interest_earned": _round(times_interest_earned, 3),
+        "roa": _round(roa, 3),
+        "roe": _round(roe, 3),
+        "profit_margin": _round(profit_margin, 3),
+        "asset_turnover": _round(asset_turnover, 3),
+        "ocf_covers_capex_and_dividends": ocf_covers_capex_dividends,
+        "portfolio_entry_pass": score >= 75.0
+        and (quality_of_earnings is not None and quality_of_earnings >= 1.0)
+        and (current_ratio is not None and current_ratio >= 1.5)
+        and (times_interest_earned is not None and times_interest_earned >= 3.0),
+    }
+    return score, breakdown
+
+
+def _module_average(*scores: float | None, max_points: float) -> float | None:
+    usable = [score for score in scores if score is not None]
+    if not usable:
+        return None
+    return (sum(usable) / len(scores)) * max_points
+
+
+def _threshold_score(value: float | None, *, pass_at: float, strong_at: float) -> float | None:
+    if value is None:
+        return None
+    if strong_at == pass_at:
+        return 1.0 if value >= pass_at else 0.0
+    return _clamp((value - pass_at) / (strong_at - pass_at), 0.0, 1.0)
+
+
+def _inverse_threshold_score(value: float | None, *, pass_at: float, strong_at: float) -> float | None:
+    if value is None:
+        return None
+    if strong_at == pass_at:
+        return 1.0 if value <= pass_at else 0.0
+    return _clamp((pass_at - value) / (pass_at - strong_at), 0.0, 1.0)
+
+
+def _inverse_abs_score(value: float | None, *, pass_at: float, strong_at: float) -> float | None:
+    if value is None:
+        return None
+    magnitude = abs(value)
+    if pass_at == strong_at:
+        return 1.0 if magnitude <= pass_at else 0.0
+    return _clamp((pass_at - magnitude) / (pass_at - strong_at), 0.0, 1.0)
+
+
+def _boolean_score(value: bool | None) -> float | None:
+    if value is None:
+        return None
+    return 1.0 if value else 0.0

@@ -67,6 +67,28 @@ def compute_fact_hash(
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def compute_fact_lineage_hash(
+    company_id: str,
+    taxonomy: str,
+    concept: str,
+    unit: str | None,
+    start: str | None,
+    end: str | None,
+    instant: str | None,
+) -> str:
+    """Compute a stable lineage key across first-report and restated versions."""
+    key_parts = [
+        str(company_id),
+        taxonomy,
+        concept,
+        unit or "no-unit",
+        start or "no-start",
+        end or "no-end",
+        instant or "no-instant",
+    ]
+    return hashlib.sha256("|".join(key_parts).encode()).hexdigest()
+
+
 def ingest_company_facts_for_company(
     session: Session,
     company: Company,
@@ -257,20 +279,22 @@ def _ingest_single_fact(
     with contextlib.suppress(TypeError, ValueError):
         decimals = int(decimals_raw) if decimals_raw is not None else None
 
-    # Parse fiscal year and period from 'fy' field or frame
+    # Parse fiscal year and period from the SEC frame string when available.
+    # Do not silently coerce missing/unknown frames into FY.
     fiscal_year = None
-    fiscal_period = "FY"  # default to annual
+    fiscal_period = None
 
-    frame_str = frame or ""
-    if frame_str:
-        # Frame format: CY2023Q1, CY2023, etc.
-        if "Q" in frame_str:
-            fiscal_period = frame_str.split("Q")[-1] if "Q" in frame_str else "FY"
-            with contextlib.suppress(ValueError):
-                fiscal_year = int(frame_str.split("Q")[0].replace("CY", ""))
-        else:
-            with contextlib.suppress(ValueError):
-                fiscal_year = int(frame_str.replace("CY", ""))
+    frame_str = (frame or "").strip().upper()
+    if frame_str.startswith("CY"):
+        with contextlib.suppress(ValueError):
+            fiscal_year = int(frame_str[2:6])
+        quarter_index = frame_str.find("Q")
+        if quarter_index >= 0:
+            quarter_token = frame_str[quarter_index : quarter_index + 2]
+            if quarter_token in {"Q1", "Q2", "Q3", "Q4"}:
+                fiscal_period = quarter_token
+        elif len(frame_str) >= 6:
+            fiscal_period = "FY"
 
     # Compute value fields
     value_numeric = None
@@ -301,6 +325,7 @@ def _ingest_single_fact(
 
     # Find filing if accession is known
     filing_id = None
+    filing = None
     company_uuid = uuid.UUID(company_id)
     if accession:
         from accountant.db.models import Filing
@@ -313,6 +338,39 @@ def _ingest_single_fact(
         )
         if filing:
             filing_id = filing.id
+
+    accepted_at = filing.accepted_at if filing else None
+    is_amendment_fact = bool(filing.is_amendment) if filing else False
+    lineage_hash = compute_fact_lineage_hash(
+        company_id=company_id,
+        taxonomy=taxonomy,
+        concept=concept,
+        unit=unit,
+        start=start_str,
+        end=end_str,
+        instant=instant_str,
+    )
+    prior_version = None
+    if filing_id:
+        prior_version = (
+            session.query(RawFact)
+            .filter(RawFact.company_id == company_uuid, RawFact.lineage_hash == lineage_hash)
+            .order_by(
+                RawFact.accepted_at.desc().nullslast(),
+                RawFact.filed_date.desc().nullslast(),
+                RawFact.created_at.desc(),
+            )
+            .first()
+        )
+    lineage_version = (prior_version.lineage_version + 1) if prior_version is not None else 1
+    first_reported_at = (
+        prior_version.first_reported_at if prior_version and prior_version.first_reported_at else accepted_at
+    )
+    first_reported_accession_number = (
+        prior_version.first_reported_accession_number
+        if prior_version and prior_version.first_reported_accession_number
+        else accession
+    )
 
     # Insert fact
     raw_fact = RawFact(
@@ -330,11 +388,18 @@ def _ingest_single_fact(
         value_text=value_text,
         fact_hash=fact_hash,
         accession_number=accession,
+        accepted_at=accepted_at,
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,
         frame=frame,
         form=form,
         filed_date=filed_date,
+        lineage_hash=lineage_hash,
+        lineage_version=lineage_version,
+        prior_version_fact_id=prior_version.id if prior_version else None,
+        first_reported_at=first_reported_at,
+        first_reported_accession_number=first_reported_accession_number,
+        is_amendment_fact=is_amendment_fact,
         label=label,
         description=description,
         source_type="companyfacts",
@@ -381,4 +446,13 @@ def query_facts(
     if form:
         query = query.filter(RawFact.form == form)
 
-    return query.order_by(RawFact.period_end.desc(), RawFact.created_at.desc()).limit(limit).all()
+    return (
+        query.order_by(
+            RawFact.period_end.desc(),
+            RawFact.accepted_at.desc().nullslast(),
+            RawFact.filed_date.desc().nullslast(),
+            RawFact.created_at.desc(),
+        )
+        .limit(limit)
+        .all()
+    )

@@ -69,6 +69,8 @@ const NAV = [
   { to: "/canonical", label: "CANONICAL", short: "CN", icon: Layers3, group: "ANALYSIS", color: "#a78bfa", description: "Canonical registry and mapped output review." },
   { to: "/time-machine", label: "TIME MACHINE", short: "TM", icon: Clock3, group: "ANALYSIS", color: "#f97316", description: "Point-in-time statement and warning snapshots." },
   { to: "/reports", label: "REPORTS", short: "RP", icon: ScrollText, group: "ANALYSIS", color: "#fb7185", description: "Ranked cached report book and machine status." },
+  { to: "/sectors", label: "SECTORS", short: "SC", icon: Radar, group: "ANALYSIS", color: "#38bdf8", description: "Sector profiles, bottlenecks, enablers, and laggers." },
+  { to: "/paper-book", label: "PAPER BOOK", short: "PB", icon: Archive, group: "ANALYSIS", color: "#a78bfa", description: "Frozen Lane 1 paper evidence and out-of-sample research tracking." },
   { to: "/buy-board", label: "BUY BOARD", short: "BB", icon: BarChart3, group: "ANALYSIS", color: "#4ade80", description: "Trade candidates, future upside, and profile cards." },
   { to: "/research", label: "RESEARCH", short: "RS", icon: BookOpen, group: "SYSTEM", color: "#e879f9", description: "Research records and statement snapshot history." }
 ];
@@ -95,6 +97,10 @@ function App() {
             <Route path="/canonical" element={<CanonicalPage />} />
             <Route path="/time-machine" element={<TimeMachinePage />} />
             <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/sectors" element={<SectorsPage />} />
+            <Route path="/sectors/:sectorSlug" element={<SectorProfilePage />} />
+            <Route path="/sectors/:sectorSlug/subsectors/:subSectorSlug" element={<SubSectorProfilePage />} />
+            <Route path="/paper-book" element={<PaperBookPage />} />
             <Route path="/buy-board" element={<BuyBoardPage />} />
             <Route path="/buy-board/:ticker" element={<BuyBoardTickerProfilePage />} />
             <Route path="/research" element={<ResearchPage />} />
@@ -106,6 +112,7 @@ function App() {
 }
 
 function TerminalProvider({ children }) {
+  const location = useLocation();
   const [dashboard, setDashboard] = useState(null);
   const [companies, setCompanies] = useState([]);
   const [selectedTicker, setSelectedTicker] = useState("");
@@ -116,35 +123,48 @@ function TerminalProvider({ children }) {
   const [shellError, setShellError] = useState("");
   const [toast, setToast] = useState("");
 
+  const hydrateCompanies = useCallback((items = []) => {
+    setCompanies(items);
+    setSelectedTicker((current) => {
+      if (!items.length) {
+        return "";
+      }
+      if (!current) {
+        return items[0].ticker;
+      }
+      return items.some((item) => item.ticker === current) ? current : items[0].ticker;
+    });
+  }, []);
+
   const refreshDashboard = useCallback(async () => {
     try {
       const data = await api.dashboard();
       setDashboard(data);
+      if (!search.trim()) {
+        hydrateCompanies(data.coverage || []);
+      }
     } catch (error) {
       setShellError(error.message);
     }
-  }, []);
+  }, [hydrateCompanies, search]);
 
   const refreshCompanies = useCallback(async (query = "") => {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      hydrateCompanies(dashboard?.coverage || []);
+      setLoadingCompanies(false);
+      return;
+    }
     setLoadingCompanies(true);
     try {
-      const data = await api.companies(query);
-      setCompanies(data);
-      setSelectedTicker((current) => {
-        if (!data.length) {
-          return "";
-        }
-        if (!current) {
-          return data[0].ticker;
-        }
-        return data.some((item) => item.ticker === current) ? current : data[0].ticker;
-      });
+      const data = await api.companies(normalizedQuery);
+      hydrateCompanies(data);
     } catch (error) {
       setShellError(error.message);
     } finally {
       setLoadingCompanies(false);
     }
-  }, []);
+  }, [dashboard?.coverage, hydrateCompanies]);
 
   const refreshIbkrStatus = useCallback(async () => {
     try {
@@ -180,26 +200,43 @@ function TerminalProvider({ children }) {
 
   useEffect(() => {
     refreshDashboard();
-    refreshCompanies();
     refreshIbkrStatus();
     const timer = setInterval(() => {
       refreshDashboard();
-      refreshCompanies(search);
       refreshIbkrStatus();
     }, 45000);
     return () => clearInterval(timer);
-  }, [refreshDashboard, refreshCompanies, refreshIbkrStatus, search]);
+  }, [refreshDashboard, refreshIbkrStatus]);
 
   useEffect(() => {
+    const quoteEnabledRoutes = new Set([
+      "/",
+      "/command-center",
+      "/coverage",
+      "/filings",
+      "/facts",
+      "/canonical",
+      "/time-machine",
+      "/research"
+    ]);
+    if (!quoteEnabledRoutes.has(location.pathname)) {
+      setMarketQuote(null);
+      return;
+    }
     refreshMarketQuote(selectedTicker);
-  }, [refreshMarketQuote, selectedTicker]);
+  }, [location.pathname, refreshMarketQuote, selectedTicker]);
 
   useEffect(() => {
+    if (!search.trim()) {
+      hydrateCompanies(dashboard?.coverage || []);
+      setLoadingCompanies(false);
+      return undefined;
+    }
     const handle = setTimeout(() => {
       refreshCompanies(search);
     }, 220);
     return () => clearTimeout(handle);
-  }, [search, refreshCompanies]);
+  }, [dashboard?.coverage, hydrateCompanies, refreshCompanies, search]);
 
   useEffect(() => {
     if (!toast) {
@@ -1024,6 +1061,120 @@ function DataQualityBar({ stats, reportStatus }) {
   );
 }
 
+function BottleneckCachePanel({ summary }) {
+  const top = summary?.overall_top_bottlenecks || [];
+  const familyCounts = summary?.focus_family_counts || {};
+  const aiCount = familyCounts["AI / compute"] || 0;
+  const energyCount = familyCounts["Energy / resources"] || 0;
+  const generalCount = familyCounts.General || 0;
+
+  return (
+    <Card title="BOTTLENECK CACHE" accentColor="#f59e0b">
+      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 14, alignItems: "stretch" }}>
+        <div style={{ borderRight: hairline, paddingRight: 14 }}>
+          <div style={{ color: muted, fontSize: 10, letterSpacing: 3 }}>CACHED COMPANIES</div>
+          <div style={{ marginTop: 8, color: accent, fontSize: 26, fontWeight: 800 }}>
+            {formatCompactNumber(summary?.companies_analyzed || 0)}
+          </div>
+          <div style={{ marginTop: 10, display: "grid", gap: 6, color: labelLight, fontSize: 11, letterSpacing: 1.5 }}>
+            <span>AI / COMPUTE {formatCompactNumber(aiCount)}</span>
+            <span>ENERGY / RESOURCES {formatCompactNumber(energyCount)}</span>
+            <span>GENERAL {formatCompactNumber(generalCount)}</span>
+          </div>
+        </div>
+        <div style={{ display: "grid", gap: 8 }}>
+          {top.length === 0 ? (
+            <Empty text="BOTTLENECK CACHE WAITING FOR REFRESH." />
+          ) : (
+            top.slice(0, 5).map((item) => (
+              <div key={item.category} style={{ display: "grid", gridTemplateColumns: "1fr 72px", gap: 10, paddingBottom: 8, borderBottom: hairline }}>
+                <span style={{ color: labelLight, fontSize: 12 }}>{item.category}</span>
+                <span style={{ color: "#f59e0b", textAlign: "right", fontWeight: 700 }}>
+                  {formatCompactNumber(item.company_count || 0)}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function SourceIntegrityPanel({ integrity }) {
+  const grade = integrity?.source_grade || "CHECKING";
+  const gradeColor = grade === "STRONG" ? "#4ade80" : grade === "WATCH" ? accent : grade === "DEGRADED" ? "#f97316" : "#fb7185";
+  const sec = integrity?.sec || {};
+  const coverage = integrity?.coverage || {};
+  const priceSources = integrity?.market_data?.price_sources || [];
+  const rawSources = sec.raw_fact_source_sample || [];
+  const warnings = integrity?.warnings || [];
+
+  return (
+    <Card title="SOURCE INTEGRITY" accentColor={gradeColor}>
+      <div style={{ display: "grid", gridTemplateColumns: "180px repeat(4, 1fr)", gap: 12, alignItems: "stretch" }}>
+        <div style={{ borderRight: hairline, paddingRight: 12 }}>
+          <div style={{ color: muted, fontSize: 10, letterSpacing: 3 }}>SOURCE GRADE</div>
+          <div style={{ marginTop: 8, color: gradeColor, fontSize: 25, fontWeight: 900 }}>{grade}</div>
+          <div style={{ marginTop: 8, color: labelLight, fontSize: 10, lineHeight: 1.5 }}>
+            {integrity?.truth_policy?.accounting_source_of_truth || "Checking source policy..."}
+          </div>
+        </div>
+        <MiniIntegrityMetric
+          label="LATEST SEC"
+          value={sec.latest_filing_date || "N/A"}
+          sub={sec.days_since_latest_filing === 0 ? "today" : `${sec.days_since_latest_filing ?? "?"}d old`}
+          color="#60a5fa"
+        />
+        <MiniIntegrityMetric
+          label="RAW SOURCE"
+          value={rawSources[0]?.source || "N/A"}
+          sub={`${formatCompactNumber(rawSources[0]?.sample_count || 0)} sampled`}
+          color={rawSources[0]?.source === "companyfacts" ? "#4ade80" : "#fb7185"}
+        />
+        <MiniIntegrityMetric
+          label="REPORT CVG"
+          value={`${Number(coverage.report_coverage_pct || 0).toFixed(1)}%`}
+          sub={`${formatCompactNumber(coverage.company_reports || 0)} reports`}
+          color={Number(coverage.report_coverage_pct || 0) >= 95 ? "#4ade80" : accent}
+        />
+        <MiniIntegrityMetric
+          label="BOTTLENECK CVG"
+          value={`${Number(coverage.bottleneck_coverage_pct || 0).toFixed(1)}%`}
+          sub={`${formatCompactNumber(coverage.bottleneck_snapshots || 0)} cached`}
+          color={Number(coverage.bottleneck_coverage_pct || 0) >= 95 ? "#4ade80" : accent}
+        />
+      </div>
+      <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ borderTop: hairline, paddingTop: 10 }}>
+          <div style={{ color: muted, fontSize: 9, letterSpacing: 2.5, marginBottom: 7 }}>MARKET DATA SUPPORT</div>
+          {(priceSources.length ? priceSources : [{ source: "NONE", count: 0 }]).map((item) => (
+            <span key={item.source} style={{ display: "inline-block", marginRight: 10, color: labelLight, fontSize: 11 }}>
+              {item.source}: <span style={{ color: accent }}>{formatCompactNumber(item.count || 0)}</span>
+            </span>
+          ))}
+        </div>
+        <div style={{ borderTop: hairline, paddingTop: 10 }}>
+          <div style={{ color: muted, fontSize: 9, letterSpacing: 2.5, marginBottom: 7 }}>WARNINGS</div>
+          <span style={{ color: warnings.length ? "#f97316" : "#4ade80", fontSize: 11 }}>
+            {warnings.length ? warnings.slice(0, 2).join(" | ") : "No source-integrity warnings."}
+          </span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function MiniIntegrityMetric({ label, value, sub, color }) {
+  return (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: hairline, padding: 12 }}>
+      <div style={{ color: muted, fontSize: 9, letterSpacing: 2.5 }}>{label}</div>
+      <div style={{ marginTop: 8, color, fontSize: 18, fontWeight: 800 }}>{value}</div>
+      <div style={{ marginTop: 6, color: labelLight, fontSize: 10 }}>{sub}</div>
+    </div>
+  );
+}
+
 function DataTransferBar({ stats }) {
   const totalCompanies = Math.max(stats?.total_companies || 0, 1);
   const filingsCoverage = Math.max(stats?.companies_with_filings || 0, 0);
@@ -1152,10 +1303,11 @@ function WorkerTickerBar({ reportStatus, workerCompanies, companiesPerMinute }) 
   const queueProgress = queueTotal > 0 ? Math.min(100, (queueBuilt / queueTotal) * 100) : 0;
   const workers = (reportStatus?.worker_states || []).length
     ? reportStatus.worker_states
-    : [{ worker_id: 1, ticker: null, status: "idle", last_action: reportStatus?.last_action || "idle", last_completed_ticker: reportStatus?.last_processed_ticker || null }];
+    : [{ worker_id: 1, role: "REPORT SWARM", ticker: null, status: "standby", last_action: reportStatus?.last_action || "standby", last_completed_ticker: reportStatus?.last_processed_ticker || null }];
   const targetWorkerCount = Math.max(workers.length, 8);
   const workerLanes = Array.from({ length: targetWorkerCount }, (_, index) => workers[index] || {
     worker_id: index + 1,
+    role: `WORKER ${index + 1}`,
     ticker: null,
     status: "standby",
     last_action: reportStatus?.pending_companies ? "standby" : "queue drained",
@@ -1246,6 +1398,7 @@ function WorkerTickerBar({ reportStatus, workerCompanies, companiesPerMinute }) 
         {workerLanes.map((worker) => {
           const workerTicker = worker.ticker || worker.last_completed_ticker || "";
           const workerCompany = workerTicker ? workerCompanies[workerTicker] : null;
+          const workerRole = worker.role || `WORKER ${worker.worker_id}`;
           const stageLabel = workerCompany?.coverage_status?.toUpperCase() || (worker.status || "idle").toUpperCase();
           let progress = 4;
           if (workerCompany?.filings_count > 0) progress = 24;
@@ -1256,10 +1409,10 @@ function WorkerTickerBar({ reportStatus, workerCompanies, companiesPerMinute }) 
           if ((reportStatus?.pending_companies || 0) === 0 && !workerTicker) progress = 100;
           const lineColor = progress >= 100 ? "#4ade80" : worker.status === "processing" ? "#60a5fa" : "#d0b15a";
           const label = workerTicker
-            ? `WORKER ${worker.worker_id} // ${workerTicker} // ${stageLabel}`
+            ? `${workerRole} // ${workerTicker} // ${stageLabel}`
             : reportStatus?.pending_companies
-              ? `WORKER ${worker.worker_id} // STANDBY`
-              : `WORKER ${worker.worker_id} // QUEUE DRAINED`;
+              ? `${workerRole} // STANDBY`
+              : `${workerRole} // QUEUE DRAINED`;
           const detail = workerCompany
             ? `FIL ${formatCompactNumber(workerCompany.filings_count)} | RAW ${formatCompactNumber(workerCompany.raw_facts_count)} | CAN ${formatCompactNumber(workerCompany.canonical_facts_count)} | STM ${formatCompactNumber(workerCompany.statement_snapshots_count)}`
             : (worker.last_action || reportStatus?.last_action || "IDLE").toUpperCase();
@@ -1324,6 +1477,8 @@ function CommandCenterPage() {
   const { dashboard, selectedTicker, shellError, setShellError } = useTerminal();
   const [reportStatus, setReportStatus] = useState(null);
   const [cacheStatus, setCacheStatus] = useState(null);
+  const [bottleneckSummary, setBottleneckSummary] = useState(null);
+  const [sourceIntegrity, setSourceIntegrity] = useState(null);
   const [workerCompanies, setWorkerCompanies] = useState({});
   const rateSamplesRef = useRef([]);
   const lastRateKeyRef = useRef(null);
@@ -1333,9 +1488,11 @@ function CommandCenterPage() {
     let cancelled = false;
 
     const loadStatus = async () => {
-      const [reportResult, cacheResult] = await Promise.allSettled([
+      const [reportResult, cacheResult, bottleneckResult, sourceResult] = await Promise.allSettled([
         api.reportMachineStatus(),
-        api.cacheStatus()
+        api.cacheStatus(),
+        api.bottleneckSummary(),
+        api.sourceIntegrity()
       ]);
       if (cancelled) {
         return;
@@ -1377,6 +1534,12 @@ function CommandCenterPage() {
       }
       if (cacheResult.status === "fulfilled") {
         setCacheStatus(cacheResult.value);
+      }
+      if (bottleneckResult.status === "fulfilled") {
+        setBottleneckSummary(bottleneckResult.value);
+      }
+      if (sourceResult.status === "fulfilled") {
+        setSourceIntegrity(sourceResult.value);
       }
       if (reportResult.status === "rejected" && cacheResult.status === "rejected") {
         setCacheStatus((current) => current);
@@ -1481,6 +1644,10 @@ function CommandCenterPage() {
         stats={stats}
         reportStatus={reportStatus}
       />
+
+      <BottleneckCachePanel summary={bottleneckSummary} />
+
+      <SourceIntegrityPanel integrity={sourceIntegrity} />
 
       <Card title="COMMAND OVERVIEW" accentColor={accent}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 0 }}>
@@ -2299,6 +2466,514 @@ function ResearchPage() {
   );
 }
 
+function SectorsPage() {
+  const { setShellError } = useTerminal();
+  const [sectors, setSectors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [sortMode, setSortMode] = useState("companies");
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.sectors()
+      .then((data) => {
+        if (active) {
+          setSectors(data);
+        }
+      })
+      .catch((error) => setShellError(error.message))
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [setShellError]);
+
+  const sortedSectors = useMemo(() => {
+    const rows = [...sectors];
+    if (sortMode === "quality") {
+      rows.sort((left, right) => (right.avg_score || 0) - (left.avg_score || 0));
+    } else if (sortMode === "bottleneck") {
+      rows.sort((left, right) => (right.top_bottlenecks?.[0]?.company_count || 0) - (left.top_bottlenecks?.[0]?.company_count || 0));
+    } else {
+      rows.sort((left, right) => (right.company_count || 0) - (left.company_count || 0));
+    }
+    return rows;
+  }, [sectors, sortMode]);
+
+  const strongestSector = useMemo(
+    () => sectors.slice().sort((left, right) => (right.avg_score || 0) - (left.avg_score || 0))[0],
+    [sectors]
+  );
+  const constrainedSector = useMemo(
+    () => sectors.slice().sort((left, right) => (right.top_bottlenecks?.[0]?.company_count || 0) - (left.top_bottlenecks?.[0]?.company_count || 0))[0],
+    [sectors]
+  );
+  const totalCompanies = sectors.reduce((sum, sector) => sum + Number(sector.company_count || 0), 0);
+  const totalBullish = sectors.reduce((sum, sector) => sum + Number(sector.bullish_count || 0), 0);
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title="SECTOR INTELLIGENCE" accentColor="#38bdf8">
+        <PageSectionHeader
+          title="SECTOR MAP"
+          description="Click a sector to open its profile: leaders, laggers, what is holding the sector back, and which companies are positioned to ease the bottleneck."
+          chips={[
+            { label: "SECTORS", value: formatCompactNumber(sectors.length), color: "#38bdf8" },
+            { label: "COMPANIES", value: formatCompactNumber(totalCompanies), color: accent },
+            { label: "BULLISH", value: formatCompactNumber(totalBullish), color: "#4ade80" }
+          ]}
+          actions={
+            <MiniSelect
+              label="SORT"
+              value={sortMode}
+              onChange={setSortMode}
+              options={[
+                { value: "companies", label: "COMPANIES" },
+                { value: "quality", label: "QUALITY" },
+                { value: "bottleneck", label: "BOTTLENECK" }
+              ]}
+            />
+          }
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
+          <MiniMetric k="STRONGEST" v={strongestSector?.sector || "N/A"} color="#4ade80" />
+          <MiniMetric k="AVG SCORE" v={strongestSector?.avg_score ?? "N/A"} color="#4ade80" />
+          <MiniMetric k="MOST CONSTRAINED" v={constrainedSector?.sector || "N/A"} color="#f59e0b" />
+          <MiniMetric k="TOP BLOCKER CO" v={constrainedSector?.top_bottlenecks?.[0]?.company_count ?? "N/A"} color="#f59e0b" />
+        </div>
+        {loading ? (
+          <SkeletonList rows={8} compact />
+        ) : sortedSectors.length === 0 ? (
+          <Empty text="NO SECTOR PROFILES AVAILABLE. BUILD REPORTS AND BOTTLENECK SNAPSHOTS FIRST." />
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 }}>
+            {sortedSectors.map((sector) => (
+              <Link
+                key={sector.sector_slug}
+                to={`/sectors/${sector.sector_slug}`}
+                className="row-hover"
+                style={{
+                  border: hairline,
+                  background: "#050509",
+                  padding: 14,
+                  color: "inherit",
+                  textDecoration: "none",
+                  display: "grid",
+                  gap: 12
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+                  <div>
+                    <div style={{ color: "#38bdf8", fontSize: 16, fontWeight: 800, letterSpacing: "0.08em" }}>{sector.sector}</div>
+                    <div style={{ color: muted, fontSize: 10, marginTop: 5 }}>{formatCompactNumber(sector.company_count)} companies under current report coverage</div>
+                  </div>
+                  <ChevronRight size={16} color="#38bdf8" />
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                  <MiniMetric k="AVG" v={sector.avg_score ?? "N/A"} color={accent} />
+                  <MiniMetric k="MODEL" v={sector.avg_model_family_score ?? "N/A"} color="#a78bfa" />
+                  <MiniMetric k="BULL" v={sector.bullish_count ?? 0} color="#4ade80" />
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {(sector.top_bottlenecks || []).slice(0, 3).map((blocker) => (
+                    <TopTag
+                      key={`${sector.sector_slug}-${blocker.category}`}
+                      label={blocker.category}
+                      value={formatCompactNumber(blocker.company_count || 0)}
+                      color="#f59e0b"
+                    />
+                  ))}
+                  {(sector.top_bottlenecks || []).length === 0 ? <TopTag label="BOTTLENECKS" value="CLEAR" color="#4ade80" /> : null}
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+function SectorProfilePage() {
+  const { sectorSlug } = useParams();
+  const { setShellError } = useTerminal();
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.sectorProfile(sectorSlug)
+      .then((data) => {
+        if (active) {
+          setProfile(data);
+        }
+      })
+      .catch((error) => setShellError(error.message))
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [sectorSlug, setShellError]);
+
+  if (loading) {
+    return (
+      <Card title="SECTOR PROFILE" accentColor="#38bdf8">
+        <SkeletonList rows={8} />
+      </Card>
+    );
+  }
+  if (!profile) {
+    return (
+      <Card title="SECTOR PROFILE" accentColor="#38bdf8">
+        <Empty text="SECTOR PROFILE NOT FOUND." />
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title={`${profile.sector} PROFILE`} accentColor="#38bdf8">
+        <PageSectionHeader
+          title="SECTOR COMMAND PROFILE"
+          description="This profile rolls up latest company report scores, deterministic bottleneck tags, model-family routing, and sector-level lagger/enabler candidates."
+          chips={[
+            { label: "VERSION", value: profile.version, color: labelLight },
+            { label: "COMPANIES", value: formatCompactNumber(profile.company_count), color: "#38bdf8" },
+            { label: "BULLISH", value: formatCompactNumber(profile.bullish_count), color: "#4ade80" }
+          ]}
+          actions={
+            <Link to="/sectors" style={{ color: "#38bdf8", fontSize: 10, textDecoration: "none", letterSpacing: "0.12em" }}>
+              BACK TO SECTORS
+            </Link>
+          }
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+          <MiniMetric k="AVG SCORE" v={profile.avg_score ?? "N/A"} color={accent} />
+          <MiniMetric k="MODEL AVG" v={profile.avg_model_family_score ?? "N/A"} color="#a78bfa" />
+          <MiniMetric k="ADEQUATE" v={profile.adequate_count ?? 0} color="#60a5fa" />
+          <MiniMetric k="TOP BLOCKERS" v={profile.top_bottlenecks?.length ?? 0} color="#f59e0b" />
+          <MiniMetric k="LAGGERS" v={profile.laggers?.length ?? 0} color="#f87171" />
+        </div>
+        <div style={{ display: "grid", gap: 8, marginTop: 14 }}>
+          {(profile.profile_notes || []).map((note) => (
+            <div key={note} style={{ border: hairline, background: "rgba(56,189,248,0.04)", padding: 10, color: labelLight, fontSize: 11, lineHeight: 1.5 }}>
+              {note}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card title="SUB-SECTOR LANES" accentColor="#a78bfa">
+        <PageSectionHeader
+          title="CLICKABLE STRATEGY LANES"
+          description="Each lane narrows the sector into a more tradeable map: focused companies, strategic constraints, enablers, leaders, and laggers."
+        />
+        <SubSectorLaneGrid sectorSlug={profile.sector_slug} lanes={profile.sub_sectors || []} />
+      </Card>
+
+      <Card title="STRATEGIC BOTTLENECK MAP" accentColor="#38bdf8">
+        <PageSectionHeader
+          title="INVESTABLE SECTOR CONSTRAINTS"
+          description="This layer is different from company lagger reasons: it maps real-world bottlenecks like power, compute, minerals, industrial buildout, logistics, and financing to stocks positioned to relieve them."
+        />
+        <StrategicBottleneckList items={profile.strategic_bottlenecks || []} />
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 18 }}>
+        <Card title="WHAT IS HOLDING IT BACK" accentColor="#f59e0b">
+          <PageSectionHeader
+            title="COMPANY-LEVEL BLOCKERS"
+            description="These are report-derived blockers affecting companies in the sector. They explain drag, but they are not always investable supply-chain themes."
+          />
+          <SectorBottleneckList items={profile.supply_chain_bottlenecks?.length ? profile.supply_chain_bottlenecks : profile.top_bottlenecks} />
+        </Card>
+
+        <Card title="SECTOR LEADERS" accentColor="#4ade80">
+          <PageSectionHeader
+            title="BEST CURRENT POSITIONING"
+            description="Highest-scoring companies in this sector profile. These are not trade instructions; they are source-backed research candidates."
+          />
+          <SectorStockList rows={profile.leaders || []} mode="leader" />
+        </Card>
+      </div>
+
+      <Card title="STOCKS POSITIONED TO EASE BOTTLENECKS" accentColor="#5eead4">
+        <PageSectionHeader
+          title="ENABLER CANDIDATES"
+          description="Companies with stronger accounting/report scores and operating indicators that line up with the sector's bottleneck categories."
+        />
+        <SectorStockList rows={profile.bottleneck_enablers || []} mode="enabler" />
+      </Card>
+
+      <Card title="SECTOR LAGGERS" accentColor="#f87171">
+        <PageSectionHeader
+          title="PRESSURE / CLEANUP LIST"
+          description="Companies with weak score pressure, insufficient data quality, or high-severity bottlenecks. Use this to see what is dragging sector quality down."
+        />
+        <SectorStockList rows={profile.laggers || []} mode="lagger" />
+      </Card>
+    </div>
+  );
+}
+
+function SubSectorProfilePage() {
+  const { sectorSlug, subSectorSlug } = useParams();
+  const { setShellError } = useTerminal();
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.subSectorProfile(sectorSlug, subSectorSlug)
+      .then((data) => {
+        if (active) {
+          setProfile(data);
+        }
+      })
+      .catch((error) => setShellError(error.message))
+      .finally(() => {
+        if (active) {
+          setLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [sectorSlug, subSectorSlug, setShellError]);
+
+  if (loading) {
+    return (
+      <Card title="SUB-SECTOR PROFILE" accentColor="#a78bfa">
+        <SkeletonList rows={8} />
+      </Card>
+    );
+  }
+  if (!profile) {
+    return (
+      <Card title="SUB-SECTOR PROFILE" accentColor="#a78bfa">
+        <Empty text="SUB-SECTOR PROFILE NOT FOUND." />
+      </Card>
+    );
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title={`${profile.sector} / ${profile.sub_sector}`} accentColor="#a78bfa">
+        <PageSectionHeader
+          title="SUB-SECTOR PROFILE"
+          description={profile.thesis}
+          chips={[
+            { label: "COMPANIES", value: formatCompactNumber(profile.company_count), color: "#a78bfa" },
+            { label: "AVG SCORE", value: profile.avg_score ?? "N/A", color: accent },
+            { label: "BULLISH", value: formatCompactNumber(profile.bullish_count), color: "#4ade80" }
+          ]}
+          actions={
+            <Link to={`/sectors/${profile.sector_slug}`} style={{ color: "#a78bfa", fontSize: 10, textDecoration: "none", letterSpacing: "0.12em" }}>
+              BACK TO {profile.sector.toUpperCase()}
+            </Link>
+          }
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+          <MiniMetric k="MODEL AVG" v={profile.avg_model_family_score ?? "N/A"} color="#a78bfa" />
+          <MiniMetric k="ADEQUATE" v={profile.adequate_count ?? 0} color="#60a5fa" />
+          <MiniMetric k="STRATEGIC" v={profile.strategic_bottlenecks?.length ?? 0} color="#38bdf8" />
+          <MiniMetric k="LEADERS" v={profile.leaders?.length ?? 0} color="#4ade80" />
+          <MiniMetric k="LAGGERS" v={profile.laggers?.length ?? 0} color="#f87171" />
+        </div>
+      </Card>
+
+      <Card title="LANE BOTTLENECK MAP" accentColor="#38bdf8">
+        <PageSectionHeader
+          title="WHAT THIS LANE IS REALLY BETTING ON"
+          description="The strategic constraints and enabler stocks specific to this sub-sector lane."
+        />
+        <StrategicBottleneckList items={profile.strategic_bottlenecks || []} />
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
+        <Card title="LANE LEADERS" accentColor="#4ade80">
+          <PageSectionHeader
+            title="BEST CURRENT POSITIONING"
+            description="Highest-scoring companies inside this lane."
+          />
+          <SectorStockList rows={profile.leaders || []} mode="leader" />
+        </Card>
+        <Card title="LANE LAGGERS" accentColor="#f87171">
+          <PageSectionHeader
+            title="WHAT IS DRAGGING THIS LANE"
+            description="Lower-quality or blocker-heavy companies inside this lane."
+          />
+          <SectorStockList rows={profile.laggers || []} mode="lagger" />
+        </Card>
+      </div>
+
+      <Card title="LANE COMPANY BLOCKERS" accentColor="#f59e0b">
+        <PageSectionHeader
+          title="OPERATING / ACCOUNTING PRESSURE"
+          description="Company-level blockers found inside this sub-sector lane."
+        />
+        <SectorBottleneckList items={profile.supply_chain_bottlenecks?.length ? profile.supply_chain_bottlenecks : profile.top_bottlenecks} />
+      </Card>
+    </div>
+  );
+}
+
+function SubSectorLaneGrid({ sectorSlug, lanes = [] }) {
+  if (!lanes.length) {
+    return <Empty text="NO SUB-SECTOR LANES DETECTED FOR THIS SECTOR YET." />;
+  }
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+      {lanes.map((lane) => (
+        <Link
+          key={lane.slug}
+          to={`/sectors/${sectorSlug}/subsectors/${lane.slug}`}
+          className="row-hover"
+          style={{
+            border: hairline,
+            background: "#050509",
+            padding: 12,
+            color: "inherit",
+            textDecoration: "none",
+            display: "grid",
+            gap: 10
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+            <div>
+              <div style={{ color: "#a78bfa", fontSize: 13, fontWeight: 800, letterSpacing: "0.08em" }}>{lane.name}</div>
+              <div style={{ color: labelLight, fontSize: 10, lineHeight: 1.45, marginTop: 6 }}>{lane.thesis}</div>
+            </div>
+            <ChevronRight size={15} color="#a78bfa" />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+            <MiniMetric k="CO" v={lane.company_count ?? 0} color="#a78bfa" />
+            <MiniMetric k="AVG" v={lane.avg_score ?? "N/A"} color={accent} />
+            <MiniMetric k="BULL" v={lane.bullish_count ?? 0} color="#4ade80" />
+            <MiniMetric k="STRAT" v={lane.strategic_bottlenecks?.length ?? 0} color="#38bdf8" />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {(lane.leaders || []).slice(0, 4).map((stock) => (
+              <TopTag key={`${lane.slug}-${stock.ticker}`} label={stock.ticker} value={formatMetricNum(stock.score)} color="#4ade80" />
+            ))}
+          </div>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function StrategicBottleneckList({ items = [] }) {
+  if (!items.length) {
+    return <Empty text="NO STRATEGIC SECTOR BOTTLENECKS DETECTED IN CURRENT CACHE." />;
+  }
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      {items.map((item) => (
+        <div key={item.category} style={{ border: hairline, background: "#050509", padding: 13 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 110px 110px", gap: 12, alignItems: "start" }}>
+            <div>
+              <div style={{ color: "#38bdf8", fontSize: 14, fontWeight: 800, letterSpacing: "0.08em" }}>{item.category}</div>
+              <div style={{ color: labelLight, fontSize: 11, lineHeight: 1.5, marginTop: 7 }}>{item.thesis}</div>
+            </div>
+            <MiniMetric k="PRESSURE" v={item.pressure_score ?? "N/A"} color="#38bdf8" />
+            <MiniMetric k="AFFECTED" v={item.affected_company_count ?? 0} color="#f59e0b" />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 8, marginTop: 12 }}>
+            {(item.enablers || []).slice(0, 8).map((stock) => (
+              <Link
+                key={`${item.category}-${stock.ticker}`}
+                to={`/buy-board/${stock.ticker}`}
+                style={{
+                  border: hairline,
+                  background: "rgba(56,189,248,0.035)",
+                  padding: 10,
+                  color: "inherit",
+                  textDecoration: "none"
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                  <span style={{ color: "#38bdf8", fontSize: 13, fontWeight: 800 }}>{stock.ticker}</span>
+                  <span style={{ color: "#4ade80", fontSize: 10 }}>ROLE {formatMetricNum(stock.enabler_score)}</span>
+                </div>
+                <div style={{ color: labelLight, fontSize: 10, marginTop: 5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{stock.company_name}</div>
+                <div style={{ color: muted, fontSize: 9, marginTop: 6 }}>{stock.strategic_role || stock.model_family || "strategic enabler"}</div>
+              </Link>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SectorBottleneckList({ items = [] }) {
+  if (!items.length) {
+    return <Empty text="NO SECTOR BOTTLENECKS DETECTED IN CURRENT CACHE." />;
+  }
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      {items.map((item, index) => (
+        <div key={`${item.category}-${index}`} style={{ border: hairline, background: "#050509", padding: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <div style={{ color: "#f59e0b", fontSize: 13, fontWeight: 800, letterSpacing: "0.08em" }}>{item.category}</div>
+            <TopTag label="COMPANIES" value={formatCompactNumber(item.company_count || 0)} color="#f59e0b" />
+          </div>
+          <div style={{ display: "grid", gap: 5, marginTop: 10 }}>
+            {(item.evidence || item.examples || []).slice(0, 5).map((line) => (
+              <div key={line} style={{ color: labelLight, fontSize: 10, lineHeight: 1.45 }}>
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SectorStockList({ rows = [], mode }) {
+  if (!rows.length) {
+    return <Empty text="NO COMPANIES AVAILABLE FOR THIS SECTION." />;
+  }
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {rows.map((row) => (
+        <div key={`${mode}-${row.ticker}`} className="row-hover" style={{ border: hairline, background: "#050509", padding: 11 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "100px 1fr 84px 84px 84px 110px", gap: 10, alignItems: "center" }}>
+            <Link to={`/buy-board/${row.ticker}`} style={{ color: "#38bdf8", fontSize: 15, fontWeight: 800, textDecoration: "none" }}>
+              {row.ticker}
+            </Link>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: labelLight, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.company_name}</div>
+              <div style={{ color: muted, fontSize: 9, marginTop: 4 }}>{row.model_family || "unknown"} | {row.data_quality_tier || "N/A"} | {row.latest_filing_date || "NO FILING DATE"}</div>
+            </div>
+            <MiniMetric k={mode === "enabler" ? "ENABLE" : "SCORE"} v={mode === "enabler" ? row.enabler_score ?? row.score ?? "N/A" : row.score ?? "N/A"} color={mode === "lagger" ? "#f87171" : "#4ade80"} />
+            <MiniMetric k="MODEL" v={row.model_family_score ?? "N/A"} color="#a78bfa" />
+            <MiniMetric k="REV" v={formatMetricPct(row.revenue_growth_pct)} color="#60a5fa" />
+            <MiniMetric k="OWNER E" v={formatMetricNum(row.owner_earnings)} color="#f59e0b" />
+          </div>
+          {row.top_bottleneck ? (
+            <div style={{ marginTop: 10, color: muted, fontSize: 10, lineHeight: 1.45 }}>
+              <span style={{ color: "#f59e0b" }}>{row.top_bottleneck.category || "BOTTLENECK"}:</span> {row.top_bottleneck.detail || row.top_bottleneck.evidence || "No detail"}
+            </div>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ReportsPage() {
   const { setShellError } = useTerminal();
   const [reports, setReports] = useState([]);
@@ -2450,18 +3125,176 @@ function ReportsPage() {
                     <div style={{ color: accent2, fontSize: 11, marginTop: 4 }}>NET {report.composite_score.toFixed(1)}</div>
                   </div>
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 10, marginTop: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 10, marginTop: 12 }}>
                   <MiniMetric k="FILINGS" v={report.key_stats.filings_count ?? "N/A"} color={accent} />
                   <MiniMetric k="RAW FACTS" v={report.key_stats.raw_facts_count ?? "N/A"} color={accent2} />
                   <MiniMetric k="CANONICAL" v={report.key_stats.canonical_facts_count ?? "N/A"} color="#a78bfa" />
                   <MiniMetric k="REV GROWTH" v={formatMetricPct(report.key_stats.revenue_growth_pct)} color="#60a5fa" />
                   <MiniMetric k="OWNER E" v={formatMetricNum(report.key_stats.owner_earnings)} color="#f59e0b" />
                   <MiniMetric k="QUALITY" v={formatMetricNum(report.key_stats.accounting_quality_score)} color="#fb7185" />
+                  <MiniMetric k="A-HIS" v={formatMetricNum(report.key_stats.a_his_score)} color="#d6b25e" />
                 </div>
               </div>
             ))}
           </div>
         )}
+      </Card>
+    </div>
+  );
+}
+
+function PaperBookPage() {
+  const { setShellError } = useTerminal();
+  const [books, setBooks] = useState([]);
+  const [selectedBook, setSelectedBook] = useState("");
+  const [positions, setPositions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [launching, setLaunching] = useState(false);
+
+  const loadBooks = useCallback(async () => {
+    setLoading(true);
+    try {
+      const bookData = await api.paperBooks();
+      setBooks(bookData);
+      setSelectedBook((current) => current || bookData[0]?.book_name || "");
+    } catch (error) {
+      setShellError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [setShellError]);
+
+  useEffect(() => {
+    loadBooks();
+  }, [loadBooks]);
+
+  useEffect(() => {
+    if (!selectedBook) {
+      setPositions([]);
+      return;
+    }
+    api.paperBook(selectedBook)
+      .then(setPositions)
+      .catch((error) => setShellError(error.message));
+  }, [selectedBook, setShellError]);
+
+  const launchBook = async () => {
+    setLaunching(true);
+    try {
+      const launchDate = new Date().toISOString().slice(0, 10);
+      const bookName = `lane1-paper-book-${launchDate}`;
+      await api.launchLane1PaperBook({ launch_date: launchDate, size: 20, book_name: bookName });
+      await loadBooks();
+      setSelectedBook(bookName);
+    } catch (error) {
+      setShellError(error.message);
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const selectedSummary = books.find((book) => book.book_name === selectedBook);
+  const totalWeight = positions.reduce((sum, position) => sum + Number(position.target_weight || 0), 0);
+  const withEntryPrice = positions.filter((position) => typeof position.entry_price === "number").length;
+
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title="LANE 1 PAPER BOOK" accentColor="#a78bfa">
+        <PageSectionHeader
+          title="OUT-OF-SAMPLE EVIDENCE"
+          description="Frozen research snapshots for the pre-registered Lane 1 book. This is research-only evidence tracking, not an execution surface."
+          chips={[
+            { label: "BOOKS", value: formatCompactNumber(books.length), color: "#a78bfa" },
+            { label: "POSITIONS", value: formatCompactNumber(positions.length), color: "#4ade80" },
+            { label: "WEIGHT", value: `${(totalWeight * 100).toFixed(1)}%`, color: accent }
+          ]}
+          actions={
+            <>
+              <MiniSelect
+                label="BOOK"
+                value={selectedBook}
+                onChange={setSelectedBook}
+                options={(books.length ? books : [{ book_name: "", position_count: 0 }]).map((book) => ({
+                  value: book.book_name,
+                  label: book.book_name || "NO BOOK"
+                }))}
+              />
+              <button
+                type="button"
+                onClick={launchBook}
+                disabled={launching}
+                style={{
+                  background: launching ? "rgba(167,139,250,0.12)" : "transparent",
+                  border: "0.5px solid #a78bfa",
+                  color: "#a78bfa",
+                  fontSize: 10,
+                  padding: "8px 14px",
+                  cursor: launching ? "wait" : "pointer",
+                  letterSpacing: "0.12em",
+                  fontFamily: "JetBrains Mono"
+                }}
+              >
+                {launching ? "LAUNCHING..." : "LAUNCH LANE 1"}
+              </button>
+            </>
+          }
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+          <MiniMetric k="BOOK" v={selectedSummary?.book_name || "NONE"} color="#a78bfa" />
+          <MiniMetric k="LAUNCH" v={selectedSummary?.launch_date || "N/A"} color={accent} />
+          <MiniMetric k="OPEN" v={selectedSummary?.open_count ?? 0} color="#4ade80" />
+          <MiniMetric k="ENTRY PX" v={`${withEntryPrice}/${positions.length}`} color="#60a5fa" />
+          <MiniMetric k="AVG WT" v={selectedSummary?.avg_target_weight ? `${(selectedSummary.avg_target_weight * 100).toFixed(2)}%` : "N/A"} color="#f59e0b" />
+        </div>
+      </Card>
+
+      <Card title="FROZEN POSITIONS" accentColor="#a78bfa">
+        <PageSectionHeader
+          title="THESIS SNAPSHOTS"
+          description="Each row stores the report-card id, grade, route family, confidence, entry price, and frozen thesis payload used at launch."
+        />
+        {loading ? (
+          <SkeletonList rows={8} compact />
+        ) : positions.length === 0 ? (
+          <Empty text="NO PAPER BOOK POSITIONS YET. LAUNCH LANE 1 WHEN THE RESEARCH-ONLY BAR IS READY." />
+        ) : (
+          <DataTable
+            columns={["TICKER", "NAME", "LANE", "ROUTE", "GRADE", "CONF", "ENTRY", "WT", "STATUS"]}
+            rows={positions.map((position) => {
+              const thesis = position.thesis_snapshot || {};
+              return [
+                position.ticker,
+                position.company_name,
+                position.lane,
+                position.route_family,
+                thesis.grade || "N/A",
+                thesis.confidence ?? "N/A",
+                formatMoney(position.entry_price),
+                `${(Number(position.target_weight || 0) * 100).toFixed(2)}%`,
+                position.status
+              ];
+            })}
+          />
+        )}
+      </Card>
+
+      <Card title="BOOK SUMMARIES" accentColor="#60a5fa">
+        <PageSectionHeader
+          title="SAVED BOOKS"
+          description="Every launch is append-only by book name; re-launching the same book skips existing tickers."
+        />
+        <DataTable
+          columns={["BOOK", "DATE", "LANE", "POSITIONS", "OPEN", "AVG WT", "CREATED"]}
+          rows={books.map((book) => [
+            book.book_name,
+            book.launch_date || "N/A",
+            book.lane || "N/A",
+            book.position_count,
+            book.open_count,
+            book.avg_target_weight ? `${(book.avg_target_weight * 100).toFixed(2)}%` : "N/A",
+            formatTimestampCompact(book.created_at)
+          ])}
+        />
       </Card>
     </div>
   );
@@ -2884,6 +3717,7 @@ function BuyBoardProfileDetail({ candidate, futureMode = false }) {
             <BoardLine k="FCST CONF" v={formatMetricPct(basis.forecast_confidence_pct)} />
             <BoardLine k="SURPRISE SCORE" v={formatMetricNum(basis.surprise_score)} />
             <BoardLine k="ACCOUNTING Q" v={formatMetricNum(basis.accounting_quality_score)} />
+            <BoardLine k="A-HIS LEDGER" v={formatMetricNum(basis.a_his_score)} />
             <BoardLine k="PRICE SOURCE" v={candidate.last_price_source || "PENDING"} />
             <BoardLine k="LAST REFRESH" v={formatTimestampCompact(candidate.last_price_refresh_at)} />
             <BoardLine k="DATA QUALITY" v={candidate.current_market_data_quality || "N/A"} />

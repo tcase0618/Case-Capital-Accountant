@@ -1,3 +1,14 @@
+FROM node:22-bookworm-slim AS frontend-builder
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+
+COPY frontend ./
+RUN npm run build
+
+
 FROM python:3.12-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.7.12 /uv /usr/local/bin/uv
@@ -11,13 +22,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 \
+    && apt-get install -y --no-install-recommends libpq5 postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md AGENTS.md ./
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY scripts ./scripts
+COPY --from=frontend-builder /frontend/dist ./frontend/dist
 
 RUN uv sync --no-dev --no-editable
 

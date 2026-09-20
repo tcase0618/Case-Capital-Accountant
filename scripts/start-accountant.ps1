@@ -146,16 +146,16 @@ $env:DATA_DIR = (Join-Path $repoRoot "data")
 $env:PYTHONPATH = (Join-Path $repoRoot "src")
 $configuredWorkers = Get-DotEnvValue -Name "MACHINE_WORKERS" -DotEnvPath $envPath
 if (-not $configuredWorkers) {
-    $configuredWorkers = "4"
+    $configuredWorkers = "8"
 }
 if ($databaseUrl -like 'postgresql*') {
     try {
         $workerValue = [int]$configuredWorkers
-        if ($workerValue -gt 4) {
-            $configuredWorkers = "4"
+        if ($workerValue -gt 8) {
+            $configuredWorkers = "8"
         }
     } catch {
-        $configuredWorkers = "4"
+        $configuredWorkers = "8"
     }
 }
 $env:MACHINE_WORKERS = $configuredWorkers
@@ -218,7 +218,7 @@ if ($databaseUrl -like 'postgresql*') {
 
 $process = Start-Process `
     -FilePath $pythonLauncher `
-    -ArgumentList @("-u", $serveScript) `
+    -ArgumentList @("-u", ('"{0}"' -f $serveScript)) `
     -WorkingDirectory $repoRoot `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutLog `

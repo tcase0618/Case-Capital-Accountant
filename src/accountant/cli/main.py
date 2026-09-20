@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from datetime import date
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from accountant.config import get_settings
 from accountant.db import create_db_engine, session_scope
-from accountant.db.models import Company, Security
+from accountant.db.models import Company, PaperBookPosition, Security
 from accountant.ingest.companyfacts import (
     ingest_company_facts_for_company,
     query_facts,
 )
 from accountant.ingest.filings import ingest_company_filings, latest_filing_for_ticker
 from accountant.logging import configure_logging, get_logger
+from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
 from accountant.taxonomy import get_canonical_registry
@@ -1495,9 +1498,10 @@ def research_record(
     log = get_logger(__name__)
 
     try:
+        from sqlalchemy import and_, select
+
         from accountant.db.models import ResearchRecord
         from accountant.sec import SecClient
-        from sqlalchemy import and_, select
 
         sec_client = SecClient()
 
@@ -1554,18 +1558,18 @@ def research_record(
                 console.print(json.dumps(output, indent=2))
             else:
                 # Human-readable output
-                console.print(f"\n[bold cyan]Research Classification Record[/bold cyan]")
+                console.print("\n[bold cyan]Research Classification Record[/bold cyan]")
                 console.print(f"[cyan]Company:[/cyan] {company.name} ({ticker})")
                 console.print(f"[cyan]As of:[/cyan] {record.as_of_date}")
 
                 # Classification
-                console.print(f"\n[bold]Classification:[/bold]")
+                console.print("\n[bold]Classification:[/bold]")
                 console.print(f"  [cyan]Status:[/cyan] {record.classification}")
                 if record.classification_confidence:
                     console.print(f"  [cyan]Confidence:[/cyan] {record.classification_confidence:.0%}")
 
                 # Key metrics
-                console.print(f"\n[bold]Key Metrics:[/bold]")
+                console.print("\n[bold]Key Metrics:[/bold]")
                 if record.accounting_quality_score is not None:
                     console.print(
                         f"  [cyan]Accounting Quality:[/cyan] {record.accounting_quality_score:.1f}/10"
@@ -1582,7 +1586,7 @@ def research_record(
                     )
 
                 # Valuation
-                console.print(f"\n[bold]Valuation:[/bold]")
+                console.print("\n[bold]Valuation:[/bold]")
                 if record.valuation_range_low and record.valuation_range_high:
                     console.print(
                         f"  [cyan]Range:[/cyan] ${record.valuation_range_low:.2f} - ${record.valuation_range_high:.2f}"
@@ -1605,12 +1609,12 @@ def research_record(
 
                 # Warnings
                 if record.warnings:
-                    console.print(f"\n[bold yellow]Warnings:[/bold yellow]")
+                    console.print("\n[bold yellow]Warnings:[/bold yellow]")
                     for warning in record.warnings:
                         console.print(f"  [yellow]• {warning}[/yellow]")
 
                 if record.classification_notes:
-                    console.print(f"\n[bold]Notes:[/bold]")
+                    console.print("\n[bold]Notes:[/bold]")
                     console.print(f"[cyan]{record.classification_notes}[/cyan]")
 
         sec_client.close()
@@ -1641,9 +1645,10 @@ def research_history(
     log = get_logger(__name__)
 
     try:
+        from sqlalchemy import and_, select
+
         from accountant.db.models import ResearchRecord
         from accountant.sec import SecClient
-        from sqlalchemy import and_, select
 
         sec_client = SecClient()
 
@@ -1701,7 +1706,7 @@ def research_history(
                 console.print(json.dumps(output, indent=2))
             else:
                 # Human-readable output
-                console.print(f"\n[bold cyan]Research Classification History[/bold cyan]")
+                console.print("\n[bold cyan]Research Classification History[/bold cyan]")
                 console.print(f"[cyan]Company:[/cyan] {company.name} ({ticker})")
                 console.print(f"[cyan]Period:[/cyan] {start} to {end}")
                 console.print(f"[cyan]Records:[/cyan] {len(records)}")
@@ -1743,7 +1748,7 @@ def research_history(
                 # Summary statistics
                 classifications = [r.classification for r in records]
                 unique_classifications = set(classifications)
-                console.print(f"\n[bold]Summary:[/bold]")
+                console.print("\n[bold]Summary:[/bold]")
                 console.print(f"  [cyan]Unique classifications:[/cyan] {len(unique_classifications)}")
                 console.print(f"  [cyan]Most recent:[/cyan] {records[-1].classification}")
                 if len(records) > 1 and records[-1].classification != records[0].classification:
@@ -1821,12 +1826,12 @@ def time_machine(
                 console.print(json.dumps(output, indent=2))
             else:
                 # Human-readable output
-                console.print(f"\n[bold cyan]Point-in-Time Snapshot[/bold cyan]")
+                console.print("\n[bold cyan]Point-in-Time Snapshot[/bold cyan]")
                 console.print(f"[cyan]Company:[/cyan] {company.name} ({company.cik})")
                 console.print(f"[cyan]As of:[/cyan] {snapshot.as_of_date}")
 
                 # Filings available
-                console.print(f"\n[bold]Filings Available:[/bold]")
+                console.print("\n[bold]Filings Available:[/bold]")
                 console.print(f"  [cyan]Annual (10-K):[/cyan] {len(snapshot.available_annual_filings)}")
                 console.print(
                     f"  [cyan]Quarterly (10-Q):[/cyan] {len(snapshot.available_quarterly_filings)}"
@@ -1834,7 +1839,7 @@ def time_machine(
                 console.print(f"  [cyan]Amendments:[/cyan] {len(snapshot.available_amendments)}")
 
                 # Data quality
-                console.print(f"\n[bold]Data Quality:[/bold]")
+                console.print("\n[bold]Data Quality:[/bold]")
                 console.print(
                     f"  [cyan]Raw fact coverage:[/cyan] {snapshot.raw_fact_coverage_pct:.0f}%"
                 )
@@ -1847,17 +1852,17 @@ def time_machine(
 
                 # Warnings
                 if snapshot.warnings:
-                    console.print(f"\n[bold yellow]Warnings:[/bold yellow]")
+                    console.print("\n[bold yellow]Warnings:[/bold yellow]")
                     for warning in snapshot.warnings:
                         console.print(f"  [yellow]• {warning}[/yellow]")
 
                 # Detailed explanation
                 if explain:
-                    console.print(f"\n[bold green]Detailed Analysis:[/bold green]")
+                    console.print("\n[bold green]Detailed Analysis:[/bold green]")
                     console.print(f"[green]{snapshot.coverage_notes}[/green]")
 
                     if snapshot.available_annual_filings:
-                        console.print(f"\n[bold]Latest 10-K:[/bold]")
+                        console.print("\n[bold]Latest 10-K:[/bold]")
                         latest_10k = snapshot.available_annual_filings[-1]
                         console.print(f"  [cyan]Fiscal End:[/cyan] {latest_10k.fiscal_end_date}")
                         console.print(f"  [cyan]Accepted:[/cyan] {latest_10k.accepted_timestamp}")
@@ -1868,6 +1873,82 @@ def time_machine(
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         log.exception("time_machine_failed", ticker=ticker, date=date, error=str(e))
+        raise typer.Exit(1) from None
+
+
+@app.command("paper-book-launch")
+def paper_book_launch(
+    launch_date: str = typer.Option(..., help="Launch date (YYYY-MM-DD)"),
+    size: int = typer.Option(20, min=1, max=200, help="Number of positions"),
+    book_name: str | None = typer.Option(None, help="Optional explicit book name"),
+) -> None:
+    """Launch the pre-registered Lane 1 paper book from latest report cards."""
+    log = get_logger(__name__)
+
+    try:
+        resolved_launch_date = date.fromisoformat(launch_date)
+        with session_scope() as session:
+            result = launch_lane1_paper_book(
+                session,
+                launch_date=resolved_launch_date,
+                size=size,
+                book_name=book_name,
+            )
+            session.commit()
+
+        console.print(f"[cyan]Book:[/cyan] {result.book_name}")
+        console.print(f"[cyan]Launch Date:[/cyan] {result.launch_date.isoformat()}")
+        console.print(f"[cyan]Selected:[/cyan] {result.selected}")
+        console.print(f"[cyan]Skipped Existing:[/cyan] {result.skipped_existing}")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        log.exception("paper_book_launch_failed", launch_date=launch_date, error=str(e))
+        raise typer.Exit(1) from None
+
+
+@app.command("paper-book-list")
+def paper_book_list(book_name: str) -> None:
+    """List frozen positions in a named paper book."""
+    log = get_logger(__name__)
+
+    try:
+        with session_scope() as session:
+            rows = (
+                session.query(PaperBookPosition)
+                .filter(PaperBookPosition.book_name == book_name)
+                .order_by(PaperBookPosition.target_weight.desc(), PaperBookPosition.ticker.asc())
+                .all()
+            )
+
+            if not rows:
+                console.print(f"[yellow]No paper book found for {book_name}[/yellow]")
+                raise typer.Exit(0)
+
+            table = Table(title=f"Lane 1 Paper Book: {book_name}")
+            table.add_column("Ticker", style="cyan")
+            table.add_column("Company", style="green")
+            table.add_column("Route", style="magenta")
+            table.add_column("Entry", style="yellow")
+            table.add_column("Weight", style="white")
+            table.add_column("Grade", style="blue")
+
+            for row in rows:
+                thesis_snapshot = dict(row.thesis_snapshot or {})
+                table.add_row(
+                    row.ticker,
+                    row.company_name,
+                    row.route_family,
+                    f"{row.entry_price:.2f}" if row.entry_price is not None else "N/A",
+                    f"{row.target_weight:.2%}",
+                    str(thesis_snapshot.get("grade") or "N/A"),
+                )
+
+            console.print(table)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        log.exception("paper_book_list_failed", book_name=book_name, error=str(e))
         raise typer.Exit(1) from None
 
 

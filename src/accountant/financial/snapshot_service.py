@@ -150,12 +150,15 @@ def _upsert_statement_snapshot(
         return StatementBuildSummary()
 
     existing = session.execute(
-        select(StatementSnapshot).where(
+        select(StatementSnapshot)
+        .where(
             StatementSnapshot.company_id == company_id,
             StatementSnapshot.statement_type == statement_type,
             StatementSnapshot.fiscal_year == fiscal_year,
             StatementSnapshot.fiscal_quarter == fiscal_quarter,
         )
+        .order_by(StatementSnapshot.created_at.desc())
+        .limit(1)
     ).scalar_one_or_none()
     if existing is None:
         snapshot = StatementSnapshot(

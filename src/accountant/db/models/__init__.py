@@ -5,10 +5,12 @@ from accountant.db.models.canonical_concept import CanonicalConcept
 from accountant.db.models.canonical_fact import CanonicalFact
 from accountant.db.models.canonical_mapping import CanonicalMapping
 from accountant.db.models.company import Company
+from accountant.db.models.company_bottleneck_snapshot import CompanyBottleneckSnapshot
 from accountant.db.models.company_report import CompanyReport
 from accountant.db.models.filing import Filing
 from accountant.db.models.filing_document import FilingDocument
 from accountant.db.models.financial_period import FinancialPeriod
+from accountant.db.models.paper_book_position import PaperBookPosition
 from accountant.db.models.raw_fact import RawFact
 from accountant.db.models.report_card import ReportCard
 from accountant.db.models.research_record import ResearchRecord
@@ -23,10 +25,12 @@ __all__ = [
     "CanonicalFact",
     "CanonicalMapping",
     "Company",
+    "CompanyBottleneckSnapshot",
     "CompanyReport",
     "Filing",
     "FilingDocument",
     "FinancialPeriod",
+    "PaperBookPosition",
     "RawFact",
     "ReportCard",
     "ResearchRecord",

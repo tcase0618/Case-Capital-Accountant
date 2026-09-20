@@ -70,9 +70,37 @@ export const api = {
       })
     }),
   reports: () => request("/api/reports"),
+  bottleneckSummary: () => request("/api/bottlenecks/summary"),
+  sourceIntegrity: () => request("/api/source-integrity"),
+  sectors: () => request("/api/sectors"),
+  sectorProfile: (sectorSlug) => request(`/api/sectors/${encodeURIComponent(sectorSlug)}`),
+  subSectorProfile: (sectorSlug, subSectorSlug) =>
+    request(`/api/sectors/${encodeURIComponent(sectorSlug)}/subsectors/${encodeURIComponent(subSectorSlug)}`),
+  bottlenecks: (params = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") {
+        search.set(key, String(value));
+      }
+    });
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request(`/api/bottlenecks${suffix}`);
+  },
   reportMachineStatus: () => request("/api/reports/status"),
   cacheStatus: () => request("/api/cache/status"),
   runReportMachineOnce: () => request("/api/reports/run-once", { method: "POST" }),
+  paperBooks: () => request("/api/paper-books"),
+  paperBook: (bookName) => request(`/api/paper-books/${encodeURIComponent(bookName)}`),
+  launchLane1PaperBook: (params = {}) => {
+    const search = new URLSearchParams();
+    Object.entries(params).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== "") {
+        search.set(key, String(value));
+      }
+    });
+    const suffix = search.size > 0 ? `?${search.toString()}` : "";
+    return request(`/api/paper-books/lane1/launch${suffix}`, { method: "POST" });
+  },
   buyBoard: () => request("/api/buy-board"),
   futureBoard: () => request("/api/future-board"),
   buyBoardStatus: () => request("/api/buy-board/status"),

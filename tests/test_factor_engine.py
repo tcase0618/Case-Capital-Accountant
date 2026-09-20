@@ -50,6 +50,9 @@ def test_build_accounting_factor_pack_computes_expected_core_factors() -> None:
         _fact("LongTermDebtNoncurrent", 200, fiscal_year=2024, period_end=date(2024, 12, 31)),
         _fact("NetIncomeLoss", 90, fiscal_year=2024, period_end=date(2024, 12, 31)),
         _fact("NetCashProvidedByUsedInOperatingActivities", 110, fiscal_year=2024, period_end=date(2024, 12, 31)),
+        _fact("PaymentsToAcquirePropertyPlantAndEquipment", 30, fiscal_year=2024, period_end=date(2024, 12, 31)),
+        _fact("PaymentsOfDividends", 10, fiscal_year=2024, period_end=date(2024, 12, 31)),
+        _fact("InterestExpense", 20, fiscal_year=2024, period_end=date(2024, 12, 31)),
         _fact("InventoryNet", 100, fiscal_year=2024, period_end=date(2024, 12, 31)),
         _fact("PrepaidExpenseCurrent", 20, fiscal_year=2024, period_end=date(2024, 12, 31)),
         _fact("DeferredRevenueCurrent", 40, fiscal_year=2024, period_end=date(2024, 12, 31)),
@@ -74,6 +77,9 @@ def test_build_accounting_factor_pack_computes_expected_core_factors() -> None:
         _fact("LongTermDebtNoncurrent", 180, fiscal_year=2025, period_end=date(2025, 12, 31)),
         _fact("NetIncomeLoss", 100, fiscal_year=2025, period_end=date(2025, 12, 31)),
         _fact("NetCashProvidedByUsedInOperatingActivities", 95, fiscal_year=2025, period_end=date(2025, 12, 31)),
+        _fact("PaymentsToAcquirePropertyPlantAndEquipment", 35, fiscal_year=2025, period_end=date(2025, 12, 31)),
+        _fact("PaymentsOfDividends", 12, fiscal_year=2025, period_end=date(2025, 12, 31)),
+        _fact("InterestExpense", 25, fiscal_year=2025, period_end=date(2025, 12, 31)),
         _fact("InventoryNet", 130, fiscal_year=2025, period_end=date(2025, 12, 31)),
         _fact("PrepaidExpenseCurrent", 25, fiscal_year=2025, period_end=date(2025, 12, 31)),
         _fact("DeferredRevenueCurrent", 50, fiscal_year=2025, period_end=date(2025, 12, 31)),
@@ -99,6 +105,11 @@ def test_build_accounting_factor_pack_computes_expected_core_factors() -> None:
     assert pack.cash_based_operating_profitability is not None and round(pack.cash_based_operating_profitability, 4) == 0.2231
     assert pack.factor_quality_score is not None and pack.factor_quality_score > 70
     assert pack.factor_forensic_risk_score is not None and pack.factor_forensic_risk_score < 70
+    assert pack.a_his_score is not None and pack.a_his_score > 50
+    assert pack.a_his_breakdown is not None
+    assert pack.a_his_breakdown["quality_of_earnings"] == 0.95
+    assert pack.a_his_breakdown["times_interest_earned"] == 5.2
+    assert pack.a_his_breakdown["ocf_covers_capex_and_dividends"] is True
     assert pack.warnings == []
 
 
@@ -115,4 +126,5 @@ def test_build_accounting_factor_pack_flags_partial_history() -> None:
     assert pack.prior_period_label is None
     assert pack.piotroski_f_score is None
     assert pack.beneish_m_score is None
+    assert pack.a_his_score is not None
     assert "only one annual period available" in pack.warnings[0]

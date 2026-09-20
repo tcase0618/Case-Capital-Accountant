@@ -13,9 +13,11 @@ from accountant.db.types import UUID
 if TYPE_CHECKING:
     from accountant.db.models.buy_board_candidate import BuyBoardCandidate
     from accountant.db.models.calculation_result import CalculationResult
+    from accountant.db.models.company_bottleneck_snapshot import CompanyBottleneckSnapshot
     from accountant.db.models.company_report import CompanyReport
     from accountant.db.models.filing import Filing
     from accountant.db.models.financial_period import FinancialPeriod
+    from accountant.db.models.paper_book_position import PaperBookPosition
     from accountant.db.models.raw_fact import RawFact
     from accountant.db.models.report_card import ReportCard
     from accountant.db.models.research_record import ResearchRecord
@@ -67,6 +69,12 @@ class Company(Base):
         back_populates="company", cascade="all, delete-orphan"
     )
     buy_board_candidates: Mapped[list[BuyBoardCandidate]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+    paper_book_positions: Mapped[list[PaperBookPosition]] = relationship(
+        back_populates="company", cascade="all, delete-orphan"
+    )
+    bottleneck_snapshots: Mapped[list[CompanyBottleneckSnapshot]] = relationship(
         back_populates="company", cascade="all, delete-orphan"
     )
 

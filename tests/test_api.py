@@ -8,7 +8,16 @@ from fastapi.testclient import TestClient
 
 import accountant.api.app as api_app
 from accountant.api.app import app, get_session
-from accountant.db.models import Company, CompanyReport, Filing, FilingDocument, RawFact, ReportCard, Security
+from accountant.db.models import (
+    Company,
+    CompanyBottleneckSnapshot,
+    CompanyReport,
+    Filing,
+    FilingDocument,
+    RawFact,
+    ReportCard,
+    Security,
+)
 from accountant.ingest.companies import BulkCompanyImportResult
 
 
@@ -324,6 +333,167 @@ def test_accountant_integration_status_and_ticker_endpoint(test_session) -> None
     assert ticker_payload["ready_for_readonly_integration"] is True
 
 
+def test_sector_endpoints_expose_profiles_bottlenecks_and_laggers(test_session) -> None:
+    company = _seed_company_with_filings_and_facts(test_session)
+    report = CompanyReport(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        as_of_date="2025-11-01",
+        stance="BULLISH",
+        bullish_score=88.0,
+        bearish_score=12.0,
+        composite_score=84.0,
+        data_quality_tier="HIGH",
+        pipeline_stage="reports-ready",
+        latest_filing_date="2025-11-01",
+        key_stats={
+            "revenue_growth_pct": 11.2,
+            "owner_earnings": 95000.0,
+            "accounting_quality_score": 91.0,
+            "a_his_score": 86.0,
+            "canonical_facts_count": 44,
+        },
+        highlights=["quality cash conversion"],
+        report_markdown="report",
+    )
+    bottleneck = CompanyBottleneckSnapshot(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        sic="3571",
+        sic_description="Electronic Computers",
+        focus_family="AI / compute",
+        model_family="operating_company",
+        stance="BULLISH",
+        score=84.0,
+        model_family_score=87.5,
+        data_quality_tier="HIGH",
+        latest_filing_date="2025-11-01",
+        bottlenecks=[
+            {
+                "category": "AI compute capacity / GPU supply",
+                "detail": "AI demand depends on available compute supply.",
+                "severity": 71.0,
+            }
+        ],
+        management_bottlenecks=[
+            {
+                "category": "Supply chain capacity",
+                "detail": "Management language references component supply capacity.",
+                "severity": 65.0,
+            }
+        ],
+    )
+    test_session.add_all([report, bottleneck])
+    test_session.commit()
+
+    app.dependency_overrides[get_session] = _session_override(test_session)
+    client = TestClient(app)
+
+    sectors_response = client.get("/api/sectors")
+    profile_response = client.get("/api/sectors/technology")
+
+    app.dependency_overrides.clear()
+
+    assert sectors_response.status_code == 200
+    sectors = sectors_response.json()
+    assert sectors[0]["sector"] == "Technology"
+    assert sectors[0]["company_count"] == 1
+    assert sectors[0]["top_bottlenecks"][0]["category"] == "AI compute capacity / GPU supply"
+
+    assert profile_response.status_code == 200
+    profile = profile_response.json()
+    assert profile["sector"] == "Technology"
+    assert profile["leaders"][0]["ticker"] == "AAPL"
+    assert profile["bottleneck_enablers"][0]["ticker"] == "AAPL"
+    assert profile["laggers"][0]["ticker"] == "AAPL"
+    assert profile["supply_chain_bottlenecks"][0]["category"] == "Supply chain capacity"
+    assert profile["sub_sectors"]
+
+
+def test_sub_sector_endpoint_exposes_lane_profile(test_session) -> None:
+    company = Company(
+        id=uuid.uuid4(),
+        cik="0001067983",
+        name="Energy Power Corp",
+        entity_type="operating",
+        sic="4911",
+        sic_description="Electric Services Natural Gas Power",
+        fiscal_year_end="1231",
+        state_of_incorporation="TX",
+    )
+    security = Security(company_id=company.id, ticker="PWRX", exchange="NYSE")
+    report = CompanyReport(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        ticker="PWRX",
+        company_name="Energy Power Corp",
+        as_of_date="2025-11-01",
+        stance="BULLISH",
+        bullish_score=84.0,
+        bearish_score=16.0,
+        composite_score=79.0,
+        data_quality_tier="HIGH",
+        pipeline_stage="reports-ready",
+        latest_filing_date="2025-11-01",
+        key_stats={
+            "revenue_growth_pct": 18.0,
+            "owner_earnings": 12000000.0,
+            "accounting_quality_score": 83.0,
+        },
+        highlights=["power demand"],
+        report_markdown="natural gas power availability for data center capacity",
+    )
+    bottleneck = CompanyBottleneckSnapshot(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        ticker="PWRX",
+        company_name="Energy Power Corp",
+        sic="4911",
+        sic_description="Electric Services Natural Gas Power",
+        focus_family="Energy / resources",
+        model_family="operating_company",
+        stance="BULLISH",
+        score=79.0,
+        model_family_score=82.0,
+        data_quality_tier="HIGH",
+        latest_filing_date="2025-11-01",
+        bottlenecks=[
+            {
+                "category": "Energy input cost / power availability",
+                "detail": "Power availability supports load growth.",
+                "severity": 60.0,
+            }
+        ],
+        management_bottlenecks=[
+            {
+                "category": "AI data-center power and grid capacity",
+                "detail": "Data center capacity needs power availability.",
+                "severity": 70.0,
+            }
+        ],
+    )
+    test_session.add_all([company, security, report, bottleneck])
+    test_session.commit()
+
+    app.dependency_overrides[get_session] = _session_override(test_session)
+    client = TestClient(app)
+
+    response = client.get("/api/sectors/energy/subsectors/power-for-ai")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sector"] == "Energy"
+    assert payload["sub_sector"] == "Power for AI"
+    assert payload["company_count"] == 1
+    assert payload["leaders"][0]["ticker"] == "PWRX"
+
+
 def test_import_coverage_universe_endpoint(test_session, monkeypatch) -> None:
     class DummySecClient:
         def close(self) -> None:
@@ -489,3 +659,78 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert payload["final_verdict"]["data_completeness_pct"] == 81.2
     assert payload["final_verdict"]["next_expected_filing_date"] == "2026-11-01"
     assert payload["final_verdict"]["score_lineage"]["canonical_score_name"] == "positive_quality_score"
+
+
+def test_paper_book_launch_and_list_endpoints(test_session) -> None:
+    company = _seed_company_with_filings_and_facts(test_session)
+    report_card = ReportCard(
+        id=uuid.uuid4(),
+        company_id=company.id,
+        report_card_id="0000320193_10-K_2025-09-27_2025-11-01",
+        cik="0000320193",
+        ticker="AAPL",
+        company_name="Apple Inc.",
+        filing_type="10-K",
+        period_of_report=date(2025, 9, 27),
+        filed_date=date(2025, 11, 1),
+        accepted_at=datetime(2025, 11, 1, 16, 30, 0),
+        accession_number="0000320193-25-000001",
+        standardized_financials={},
+        growth_trend_deltas={},
+        accrual_cash_quality={},
+        forensic_scores={},
+        positive_quality={},
+        event_red_flags={},
+        textual_signals={},
+        non_gaap_forensics={},
+        governance_ownership={},
+        market_data_linkage={"price_asof": 123.45},
+        universe_tradability={
+            "passes_liquidity_filter": True,
+            "excluded_financial_reit": False,
+            "excluded_biotech_prerevenue": False,
+            "excluded_recent_ipo": False,
+        },
+        final_verdict={
+            "grade": "A",
+            "grade_score": 91.4,
+            "confidence": 0.87,
+            "current_action": "BUY",
+            "veto_triggered": False,
+            "route_family": "operating_company",
+            "route_reason": "default operating company stack",
+            "lane1_supported": True,
+            "data_completeness_pct": 81.2,
+        },
+    )
+    test_session.add(report_card)
+    test_session.commit()
+
+    app.dependency_overrides[get_session] = _session_override(test_session)
+    client = TestClient(app)
+
+    launch = client.post(
+        "/api/paper-books/lane1/launch",
+        params={"launch_date": "2026-08-31", "size": 5, "book_name": "lane1-smoke"},
+    )
+    summaries = client.get("/api/paper-books")
+    listing = client.get("/api/paper-books/lane1-smoke")
+
+    app.dependency_overrides.clear()
+
+    assert launch.status_code == 200
+    assert launch.json()["details"]["selected"] == 1
+    assert launch.json()["details"]["book_name"] == "lane1-smoke"
+
+    assert summaries.status_code == 200
+    assert summaries.json()[0]["book_name"] == "lane1-smoke"
+    assert summaries.json()[0]["position_count"] == 1
+    assert summaries.json()[0]["open_count"] == 1
+
+    assert listing.status_code == 200
+    payload = listing.json()
+    assert len(payload) == 1
+    assert payload[0]["ticker"] == "AAPL"
+    assert payload[0]["book_name"] == "lane1-smoke"
+    assert payload[0]["route_family"] == "operating_company"
+    assert payload[0]["thesis_snapshot"]["grade"] == "A"

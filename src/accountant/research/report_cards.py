@@ -52,10 +52,28 @@ def persist_report_card(
 
     prior = session.execute(
         select(ReportCard)
-        .where(ReportCard.company_id == company.id, ReportCard.filed_date < latest_filing.filing_date)
-        .order_by(desc(ReportCard.filed_date), desc(ReportCard.created_at))
+        .where(
+            ReportCard.company_id == company.id,
+            (ReportCard.accepted_at < latest_filing.accepted_at)
+            if latest_filing.accepted_at is not None
+            else (ReportCard.filed_date < latest_filing.filing_date),
+        )
+        .order_by(desc(ReportCard.accepted_at), desc(ReportCard.filed_date), desc(ReportCard.created_at))
         .limit(1)
     ).scalar_one_or_none()
+    restated_target = None
+    if latest_filing.is_amendment:
+        base_filing_type = _base_filing_type(latest_filing.form_type)
+        restated_target = session.execute(
+            select(ReportCard)
+            .where(
+                ReportCard.company_id == company.id,
+                ReportCard.filing_type == base_filing_type,
+                ReportCard.period_of_report == period_of_report,
+            )
+            .order_by(desc(ReportCard.accepted_at), desc(ReportCard.filed_date), desc(ReportCard.created_at))
+            .limit(1)
+        ).scalar_one_or_none()
     security = session.execute(
         select(Security).where(Security.company_id == company.id).order_by(Security.ticker.asc()).limit(1)
     ).scalar_one_or_none()
@@ -77,7 +95,7 @@ def persist_report_card(
         source_url=latest_filing.source_url,
         raw_filing_sha256=_pointer_hash(latest_filing.accession_number, latest_filing.source_url),
         is_restatement=bool(latest_filing.is_amendment),
-        restates_report_card_id=prior.report_card_id if latest_filing.is_amendment and prior else None,
+        restates_report_card_id=restated_target.report_card_id if restated_target else None,
         tag_map_version=tag_map_version,
         prior_report_card_id=prior.report_card_id if prior else None,
         standardized_financials=standardized_financials,
@@ -101,7 +119,12 @@ def persist_report_card(
 def latest_report_cards(session: Session, *, limit: int = 200) -> list[ReportCard]:
     rows = session.execute(
         select(ReportCard)
-        .order_by(ReportCard.cik.asc(), ReportCard.filed_date.desc(), ReportCard.created_at.desc())
+        .order_by(
+            ReportCard.cik.asc(),
+            ReportCard.accepted_at.desc(),
+            ReportCard.filed_date.desc(),
+            ReportCard.created_at.desc(),
+        )
     ).scalars().all()
     latest_by_cik: dict[str, ReportCard] = {}
     for row in rows:
@@ -115,7 +138,7 @@ def latest_report_card_for_ticker(session: Session, ticker: str) -> ReportCard |
     rows = session.execute(
         select(ReportCard)
         .where(ReportCard.ticker == ticker.upper())
-        .order_by(ReportCard.filed_date.desc(), ReportCard.created_at.desc())
+        .order_by(ReportCard.accepted_at.desc(), ReportCard.filed_date.desc(), ReportCard.created_at.desc())
         .limit(1)
     ).scalars().all()
     return rows[0] if rows else None
@@ -130,3 +153,7 @@ def _build_report_card_id(*, cik: str, filing_type: str, period_of_report: date 
 def _pointer_hash(accession_number: str, source_url: str | None) -> str:
     payload = f"{accession_number}|{source_url or ''}".encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _base_filing_type(filing_type: str) -> str:
+    return filing_type.replace("/A", "").replace("-A", "")

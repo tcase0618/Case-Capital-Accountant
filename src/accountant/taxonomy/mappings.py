@@ -173,6 +173,22 @@ CANONICAL_MAPPINGS = [
         confidence="HIGH",
         rationale="Interest expense on debt",
     ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="InterestExpenseAndDebtExpense",
+        canonical_concept_code="CC_INTEREST_EXPENSE",
+        priority=105,
+        confidence="HIGH",
+        rationale="Common SEC companyfacts interest expense alias",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="InterestAndDebtExpense",
+        canonical_concept_code="CC_INTEREST_EXPENSE",
+        priority=98,
+        confidence="HIGH",
+        rationale="Interest and debt expense alias",
+    ),
     # Income Tax
     MappingRuleDefinition(
         taxonomy="us-gaap",
@@ -217,6 +233,14 @@ CANONICAL_MAPPINGS = [
         priority=100,
         confidence="HIGH",
         rationale="Current assets",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="CurrentAssets",
+        canonical_concept_code="CC_CURRENT_ASSETS",
+        priority=95,
+        confidence="MEDIUM",
+        rationale="Common custom/current-assets alias",
     ),
     # Cash
     MappingRuleDefinition(
@@ -349,6 +373,14 @@ CANONICAL_MAPPINGS = [
         confidence="HIGH",
         rationale="Current liabilities",
     ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="CurrentLiabilities",
+        canonical_concept_code="CC_CURRENT_LIABILITIES",
+        priority=95,
+        confidence="MEDIUM",
+        rationale="Common custom/current-liabilities alias",
+    ),
     # Accounts Payable
     MappingRuleDefinition(
         taxonomy="us-gaap",
@@ -377,11 +409,35 @@ CANONICAL_MAPPINGS = [
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",
+        source_concept="LongTermDebtCurrent",
+        canonical_concept_code="CC_SHORT_TERM_DEBT",
+        priority=103,
+        confidence="HIGH",
+        rationale="Current portion of long-term debt",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="CurrentPortionOfLongTermDebt",
+        canonical_concept_code="CC_SHORT_TERM_DEBT",
+        priority=97,
+        confidence="MEDIUM",
+        rationale="Current long-term debt alias",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
         source_concept="ShortTermDebt",
         canonical_concept_code="CC_SHORT_TERM_DEBT",
         priority=100,
         confidence="HIGH",
         rationale="Short-term borrowings",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="ShortTermBorrowings",
+        canonical_concept_code="CC_SHORT_TERM_DEBT",
+        priority=100,
+        confidence="HIGH",
+        rationale="Short-term borrowings alias",
     ),
     # Long-term Debt
     MappingRuleDefinition(
@@ -391,6 +447,22 @@ CANONICAL_MAPPINGS = [
         priority=100,
         confidence="HIGH",
         rationale="Debt due after one year",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="LongTermDebtNoncurrent",
+        canonical_concept_code="CC_LONG_TERM_DEBT",
+        priority=104,
+        confidence="HIGH",
+        rationale="Noncurrent long-term debt",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+        canonical_concept_code="CC_LONG_TERM_DEBT",
+        priority=96,
+        confidence="MEDIUM",
+        rationale="Debt plus finance lease noncurrent alias",
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",
@@ -426,6 +498,14 @@ CANONICAL_MAPPINGS = [
         priority=100,
         confidence="HIGH",
         rationale="Equity including NCI",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="StockholdersEquityIncludingPortionAttributableToNoncontrollingInterestMember",
+        canonical_concept_code="CC_SHAREHOLDERS_EQUITY",
+        priority=80,
+        confidence="LOW",
+        rationale="Fallback equity alias seen in malformed exports",
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",
@@ -481,6 +561,22 @@ CANONICAL_MAPPINGS = [
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",
+        source_concept="NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+        canonical_concept_code="CC_OPERATING_CASH_FLOW",
+        priority=98,
+        confidence="HIGH",
+        rationale="Operating cash flow from continuing operations",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="CashFlowsFromUsedInOperatingActivities",
+        canonical_concept_code="CC_OPERATING_CASH_FLOW",
+        priority=95,
+        confidence="MEDIUM",
+        rationale="Operating cash flow alias",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
         source_concept="OperatingCashFlow",
         canonical_concept_code="CC_OPERATING_CASH_FLOW",
         priority=100,
@@ -532,11 +628,35 @@ CANONICAL_MAPPINGS = [
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",
+        source_concept="PaymentsToAcquireProductiveAssets",
+        canonical_concept_code="CC_CAPITAL_EXPENDITURES",
+        priority=98,
+        confidence="HIGH",
+        rationale="Cash paid for productive assets",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="PaymentsToAcquirePropertyPlantAndEquipmentAndIntangibleAssets",
+        canonical_concept_code="CC_CAPITAL_EXPENDITURES",
+        priority=95,
+        confidence="MEDIUM",
+        rationale="Capex plus intangibles outflow",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
         source_concept="CapitalExpenditures",
         canonical_concept_code="CC_CAPITAL_EXPENDITURES",
         priority=100,
         confidence="HIGH",
         rationale="Capital expenditures",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="CapitalExpenditure",
+        canonical_concept_code="CC_CAPITAL_EXPENDITURES",
+        priority=92,
+        confidence="MEDIUM",
+        rationale="Singular capex alias",
     ),
     # Depreciation & Amortization
     MappingRuleDefinition(
@@ -848,6 +968,22 @@ CANONICAL_MAPPINGS = [
         priority=100,
         confidence="HIGH",
         rationale="Weighted average shares basic",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+        canonical_concept_code="CC_WEIGHTED_SHARES_DILUTED",
+        priority=102,
+        confidence="HIGH",
+        rationale="Combined basic and diluted weighted shares",
+    ),
+    MappingRuleDefinition(
+        taxonomy="us-gaap",
+        source_concept="WeightedAverageNumberOfDilutedSharesOutstanding",
+        canonical_concept_code="CC_WEIGHTED_SHARES_DILUTED",
+        priority=103,
+        confidence="HIGH",
+        rationale="Diluted weighted shares alias",
     ),
     MappingRuleDefinition(
         taxonomy="us-gaap",

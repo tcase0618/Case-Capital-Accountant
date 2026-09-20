@@ -164,17 +164,22 @@ def _ingest_recent_block(
     accessions = block.get("accessionNumber") or []
     if not isinstance(accessions, list):
         return
+    cleaned_accessions = [_clean(raw_accession) for raw_accession in accessions]
+    candidate_accessions = [accession for accession in cleaned_accessions if accession]
+    existing_accessions: set[str] = set()
+    if candidate_accessions:
+        existing_accessions = set(
+            session.execute(
+                select(Filing.accession_number).where(Filing.accession_number.in_(candidate_accessions))
+            ).scalars()
+        )
 
-    for index, raw_accession in enumerate(accessions):
-        accession = _clean(raw_accession)
+    for index, accession in enumerate(cleaned_accessions):
         if not accession:
             log.warning("ingest.filing_missing_accession", cik=company.cik, index=index)
             continue
 
-        existing = session.execute(
-            select(Filing).where(Filing.accession_number == accession)
-        ).scalar_one_or_none()
-        if existing is not None:
+        if accession in existing_accessions:
             result.skipped += 1
             continue
 
@@ -238,6 +243,7 @@ def _ingest_recent_block(
 
         result.inserted += 1
         result.accession_numbers.append(accession)
+        existing_accessions.add(accession)
 
 
 def latest_filing_for_ticker(session: Session, ticker: str) -> Filing | None:

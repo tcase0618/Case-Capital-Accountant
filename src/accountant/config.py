@@ -4,7 +4,6 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -36,7 +35,7 @@ class Settings(BaseSettings):
     machine_interval_seconds: int = Field(default=15)
     machine_universes: str = Field(default="sp500,nasdaq,russell2000")
     machine_batch_size: int = Field(default=10)
-    machine_workers: int = Field(default=3)
+    machine_workers: int = Field(default=8)
 
     sec_base_www: str = Field(default="https://www.sec.gov")
     sec_base_data: str = Field(default="https://data.sec.gov")

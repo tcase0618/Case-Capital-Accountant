@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: accountant
+          POSTGRES_USER: accountant
+          POSTGRES_PASSWORD: accountant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U accountant -d accountant"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://accountant:accountant@127.0.0.1:5432/accountant
+      ACCOUNTANT_ENV: test
+      SEC_USER_AGENT: Case Capital CI ci@example.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Sync dependencies
+        run: uv sync --extra dev
+
+      - name: Ruff
+        run: uv run ruff check src tests
+
+      - name: Pytest
+        run: uv run pytest
+
+      - name: Alembic migration smoke check
+        run: uv run alembic upgrade head
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate production compose file
+        run: docker compose -f docker-compose.prod.yml config
+
+      - name: Build production image
+        run: docker build -t case-capital-accountant:ci .

@@ -1,5 +1,6 @@
 # Environment
 .env
+.env.production
 .venv/
 venv/
 frontend/node_modules/
@@ -28,9 +29,12 @@ data/parquet/*
 data/*.db
 data/*.db-shm
 data/*.db-wal
+accountant-ci-local.db
 *.duckdb
 *.duckdb.wal
 .run/
+artifacts/
+backups/
 output/
 tmp/
 *.log

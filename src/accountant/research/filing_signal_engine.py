@@ -54,7 +54,14 @@ _NEGATIVE_TONE_WORDS = {
     "volatility",
     "weakness",
 }
-_AUDITOR_KEYWORDS = ("auditor", "independent registered public accounting firm", "dismissed", "engaged")
+_AUDITOR_CONTEXT_KEYWORDS = ("auditor", "independent registered public accounting firm", "accounting firm")
+_AUDITOR_CHANGE_KEYWORDS = (
+    "dismissed",
+    "resigned",
+    "declined to stand for re-election",
+    "engaged",
+    "appointed",
+)
 _CFO_KEYWORDS = ("chief financial officer", "cfo", "principal financial officer")
 _CEO_KEYWORDS = ("chief executive officer", "ceo", "principal executive officer")
 _SUPPLIER_FINANCE_KEYWORDS = ("supplier finance", "supply chain finance", "reverse factoring")
@@ -205,7 +212,7 @@ def build_event_red_flags(
             fetched = fetch(filing.source_url, sec_user_agent)
             if fetched:
                 text = f"{text} {fetched}"
-        if not auditor_changed_flag and contains_any(text, _AUDITOR_KEYWORDS):
+        if not auditor_changed_flag and is_auditor_change_disclosure(text):
             auditor_changed_flag = True
             auditor_change_date = filing.filing_date.isoformat() if filing.filing_date else None
             auditor_name = extract_auditor_name(text)
@@ -401,6 +408,10 @@ def extract_first_percentage(text: str, patterns: list[str]) -> float | None:
 def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     lowered = text.lower()
     return any(keyword in lowered for keyword in keywords)
+
+
+def is_auditor_change_disclosure(text: str) -> bool:
+    return contains_any(text, _AUDITOR_CONTEXT_KEYWORDS) and contains_any(text, _AUDITOR_CHANGE_KEYWORDS)
 
 
 def extract_auditor_name(text: str) -> str | None:

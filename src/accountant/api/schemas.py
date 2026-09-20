@@ -56,11 +56,18 @@ class RawFactResponse(BaseModel):
     instant_date: date | None
     value_numeric: Decimal | None
     value_text: str | None
+    accepted_at: str | None = None
     form: str | None
     filed_date: date | None
     fiscal_year: int | None
     fiscal_period: str | None
     frame: str | None
+    lineage_hash: str | None = None
+    lineage_version: int = 1
+    prior_version_fact_id: UUID | None = None
+    first_reported_at: str | None = None
+    first_reported_accession_number: str | None = None
+    is_amendment_fact: bool = False
     label: str | None
     description: str | None
     source_type: str
@@ -350,6 +357,97 @@ class CompanyReportResponse(BaseModel):
     updated_at: str | None = None
 
 
+class CompanyBottleneckSnapshotResponse(BaseModel):
+    ticker: str
+    company_name: str
+    sic: str | None = None
+    sic_description: str | None = None
+    focus_family: str
+    model_family: str
+    model_family_reason: str | None = None
+    stance: str | None = None
+    score: float | None = None
+    model_family_score: float | None = None
+    data_quality_tier: str | None = None
+    latest_filing_date: str | None = None
+    bottlenecks: list[dict[str, object]]
+    management_bottlenecks: list[dict[str, object]]
+    source: str
+    updated_at: str | None = None
+
+
+class BottleneckSummaryResponse(BaseModel):
+    companies_analyzed: int
+    focus_family_counts: dict[str, int]
+    ai_compute_top_bottlenecks: list[dict[str, object]]
+    energy_resources_top_bottlenecks: list[dict[str, object]]
+    overall_top_bottlenecks: list[dict[str, object]]
+
+
+class SourceIntegrityResponse(BaseModel):
+    version: str
+    generated_at: str
+    source_grade: str
+    warnings: list[str]
+    sec: dict[str, object]
+    coverage: dict[str, object]
+    market_data: dict[str, object]
+    truth_policy: dict[str, object]
+
+
+class SectorSummaryResponse(BaseModel):
+    sector: str
+    sector_slug: str
+    company_count: int
+    avg_score: float | None = None
+    avg_model_family_score: float | None = None
+    bullish_count: int
+    adequate_count: int
+    ai_compute_count: int
+    energy_resources_count: int
+    top_bottlenecks: list[dict[str, object]]
+
+
+class SectorProfileResponse(BaseModel):
+    version: str
+    sector: str
+    sector_slug: str
+    company_count: int
+    avg_score: float | None = None
+    avg_model_family_score: float | None = None
+    bullish_count: int
+    adequate_count: int
+    top_bottlenecks: list[dict[str, object]]
+    supply_chain_bottlenecks: list[dict[str, object]]
+    strategic_bottlenecks: list[dict[str, object]]
+    sub_sectors: list[dict[str, object]] = []
+    bottleneck_enablers: list[dict[str, object]]
+    laggers: list[dict[str, object]]
+    leaders: list[dict[str, object]]
+    profile_notes: list[str]
+
+
+class SubSectorProfileResponse(BaseModel):
+    version: str
+    sector: str
+    sector_slug: str
+    sub_sector: str
+    sub_sector_slug: str
+    thesis: str
+    company_count: int
+    avg_score: float | None = None
+    avg_model_family_score: float | None = None
+    bullish_count: int
+    adequate_count: int
+    top_bottlenecks: list[dict[str, object]]
+    supply_chain_bottlenecks: list[dict[str, object]]
+    strategic_bottlenecks: list[dict[str, object]]
+    bottleneck_enablers: list[dict[str, object]]
+    laggers: list[dict[str, object]]
+    leaders: list[dict[str, object]]
+    profile_notes: list[str]
+
+
 class ReportCardResponse(BaseModel):
     ticker: str
     cik: str
@@ -381,6 +479,34 @@ class ReportCardResponse(BaseModel):
     market_data_linkage: dict[str, object]
     universe_tradability: dict[str, object]
     final_verdict: dict[str, object]
+    created_at: str | None = None
+
+
+class PaperBookPositionResponse(BaseModel):
+    id: UUID
+    book_name: str
+    launch_date: str
+    lane: str
+    route_family: str
+    route_reason: str | None = None
+    ticker: str
+    company_name: str
+    report_card_id: str
+    entry_price: float | None = None
+    target_weight: float
+    status: str
+    thesis_snapshot: dict[str, object]
+    notes: str | None = None
+    created_at: str | None = None
+
+
+class PaperBookSummaryResponse(BaseModel):
+    book_name: str
+    launch_date: str | None = None
+    lane: str | None = None
+    position_count: int
+    open_count: int
+    avg_target_weight: float | None = None
     created_at: str | None = None
 
 
@@ -488,6 +614,7 @@ class ReportMachineStatusResponse(BaseModel):
 
 class ReportWorkerStatusResponse(BaseModel):
     worker_id: int
+    role: str | None = None
     ticker: str | None = None
     status: str
     last_action: str | None = None

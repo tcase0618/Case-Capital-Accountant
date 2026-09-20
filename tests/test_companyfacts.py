@@ -1,13 +1,15 @@
 """Tests for CompanyFacts ingestion and XBRL facts."""
 
-from datetime import date
+from datetime import date, datetime
 from unittest.mock import patch
 
 import pytest
 
 from accountant.db.models import Company, Filing, RawFact
 from accountant.ingest.companyfacts import (
+    _ingest_single_fact,
     compute_fact_hash,
+    compute_fact_lineage_hash,
     ingest_company_facts_for_company,
     query_facts,
 )
@@ -120,6 +122,27 @@ class TestFactHashing:
             value=2000000,
         )
         assert hash1 != hash2
+
+    def test_lineage_hash_ignores_accession_and_value(self):
+        hash1 = compute_fact_lineage_hash(
+            company_id="company-1",
+            taxonomy="us-gaap",
+            concept="Assets",
+            unit="USD",
+            start=None,
+            end="2023-12-31",
+            instant=None,
+        )
+        hash2 = compute_fact_lineage_hash(
+            company_id="company-1",
+            taxonomy="us-gaap",
+            concept="Assets",
+            unit="USD",
+            start=None,
+            end="2023-12-31",
+            instant=None,
+        )
+        assert hash1 == hash2
 
 
 class TestCompanyFactsClient:
@@ -350,3 +373,135 @@ class TestFactIngest:
         fact.value_numeric = 2000000
         with pytest.raises(RuntimeError, match="immutable"):
             test_session.flush()
+
+    def test_frame_parsing_preserves_quarter_and_unknown_periods(self, test_session):
+        company = Company(cik="0000320193", name="Apple Inc.")
+        test_session.add(company)
+        test_session.flush()
+
+        filing = Filing(
+            company_id=company.id,
+            accession_number="0000320193-24-000010",
+            form_type="10-Q",
+            filing_date=date(2024, 5, 1),
+        )
+        test_session.add(filing)
+        test_session.flush()
+
+        assert _ingest_single_fact(
+            session=test_session,
+            company_id=str(company.id),
+            company_cik=company.cik,
+            taxonomy="us-gaap",
+            concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+            label="Revenue",
+            description="Revenue",
+            unit="USD",
+            fact_dict={
+                "val": 125.0,
+                "accn": filing.accession_number,
+                "form": "10-Q",
+                "filed": "2024-05-01",
+                "frame": "CY2024Q1I",
+                "start": "2024-01-01",
+                "end": "2024-03-31",
+            },
+        )
+        assert _ingest_single_fact(
+            session=test_session,
+            company_id=str(company.id),
+            company_cik=company.cik,
+            taxonomy="us-gaap",
+            concept="NetIncomeLoss",
+            label="Net income",
+            description="Net income",
+            unit="USD",
+            fact_dict={
+                "val": 12.0,
+                "accn": filing.accession_number,
+                "form": "10-Q",
+                "filed": "2024-05-01",
+                "start": "2024-01-01",
+                "end": "2024-03-31",
+            },
+        )
+
+        revenue_fact = test_session.query(RawFact).filter(RawFact.concept == "RevenueFromContractWithCustomerExcludingAssessedTax").one()
+        income_fact = test_session.query(RawFact).filter(RawFact.concept == "NetIncomeLoss").one()
+
+        assert revenue_fact.fiscal_year == 2024
+        assert revenue_fact.fiscal_period == "Q1"
+        assert income_fact.fiscal_year is None
+        assert income_fact.fiscal_period is None
+
+    def test_lineage_fields_link_restated_versions(self, test_session):
+        company = Company(cik="0000320193", name="Apple Inc.")
+        test_session.add(company)
+        test_session.flush()
+
+        filing_original = Filing(
+            company_id=company.id,
+            accession_number="0000320193-24-000001",
+            form_type="10-K",
+            filing_date=date(2024, 2, 1),
+            accepted_at=datetime.fromisoformat("2024-02-01T16:30:00"),
+        )
+        filing_amendment = Filing(
+            company_id=company.id,
+            accession_number="0000320193-24-000002",
+            form_type="10-K/A",
+            filing_date=date(2024, 3, 15),
+            accepted_at=datetime.fromisoformat("2024-03-15T16:30:00"),
+            is_amendment=True,
+        )
+        test_session.add_all([filing_original, filing_amendment])
+        test_session.flush()
+
+        assert _ingest_single_fact(
+            session=test_session,
+            company_id=str(company.id),
+            company_cik=company.cik,
+            taxonomy="us-gaap",
+            concept="Assets",
+            label="Assets",
+            description="Total assets",
+            unit="USD",
+            fact_dict={
+                "val": 100,
+                "accn": filing_original.accession_number,
+                "form": "10-K",
+                "filed": "2024-02-01",
+                "end": "2023-12-31",
+            },
+        )
+        assert _ingest_single_fact(
+            session=test_session,
+            company_id=str(company.id),
+            company_cik=company.cik,
+            taxonomy="us-gaap",
+            concept="Assets",
+            label="Assets",
+            description="Total assets",
+            unit="USD",
+            fact_dict={
+                "val": 110,
+                "accn": filing_amendment.accession_number,
+                "form": "10-K/A",
+                "filed": "2024-03-15",
+                "end": "2023-12-31",
+            },
+        )
+
+        facts = (
+            test_session.query(RawFact)
+            .filter(RawFact.company_id == company.id, RawFact.concept == "Assets")
+            .order_by(RawFact.lineage_version.asc())
+            .all()
+        )
+        assert len(facts) == 2
+        assert facts[0].lineage_hash == facts[1].lineage_hash
+        assert facts[0].lineage_version == 1
+        assert facts[1].lineage_version == 2
+        assert facts[1].prior_version_fact_id == facts[0].id
+        assert facts[1].first_reported_accession_number == filing_original.accession_number
+        assert facts[1].is_amendment_fact is True

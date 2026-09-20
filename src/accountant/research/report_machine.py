@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -22,6 +21,7 @@ from accountant.db.models import (
     RawFact,
     ResearchRecord,
     Security,
+    StatementSnapshot,
 )
 from accountant.domain.exceptions import TickerNotFoundError
 from accountant.financial.snapshot_service import build_company_statement_snapshots
@@ -35,8 +35,11 @@ from accountant.ingest.filings import (
     ingest_company_filings_payload,
 )
 from accountant.logging import get_logger
+from accountant.market.alpaca_research import quote as alpaca_quote
+from accountant.research.bottleneck_engine import upsert_company_bottleneck_snapshot
 from accountant.research.buy_board import _estimate_share_count, sync_buy_board_candidate
 from accountant.research.classification_engine import FundamentalResearchClassificationEngine
+from accountant.research.company_router import route_company
 from accountant.research.data_quality_engine import ResearchDataQualityEngine
 from accountant.research.factor_engine import build_accounting_factor_pack
 from accountant.research.filing_signal_engine import (
@@ -63,6 +66,57 @@ _NON_OPERATING_NAME_MARKERS = (
     "blank check",
     "spac",
 )
+
+_BASE_WORKER_ROLES: list[dict[str, Any]] = [
+    {
+        "role": "sec-filings-a",
+        "label": "SEC FILINGS A",
+        "primary_lane": "filings",
+        "fallback_lanes": ["report-build", "report-refresh"],
+    },
+    {
+        "role": "sec-filings-b",
+        "label": "SEC FILINGS B",
+        "primary_lane": "filings",
+        "fallback_lanes": ["report-build", "report-refresh"],
+    },
+    {
+        "role": "companyfacts",
+        "label": "COMPANYFACTS",
+        "primary_lane": "companyfacts",
+        "fallback_lanes": ["canonical", "report-build"],
+    },
+    {
+        "role": "canonical",
+        "label": "CANONICAL",
+        "primary_lane": "canonical",
+        "fallback_lanes": ["statements", "report-build"],
+    },
+    {
+        "role": "statements",
+        "label": "STATEMENTS",
+        "primary_lane": "statements",
+        "fallback_lanes": ["report-build", "report-refresh"],
+    },
+    {
+        "role": "reports-a",
+        "label": "REPORTS A",
+        "primary_lane": "report-build",
+        "fallback_lanes": ["report-refresh", "strategy"],
+    },
+    {
+        "role": "reports-b",
+        "label": "REPORTS B",
+        "primary_lane": "report-build",
+        "fallback_lanes": ["report-refresh", "strategy"],
+    },
+    {
+        "role": "strategy",
+        "label": "STRATEGY",
+        "primary_lane": "strategy",
+        "fallback_lanes": ["report-refresh", "report-build"],
+    },
+]
 
 
 @dataclass
@@ -140,22 +194,23 @@ class ContinuousResearchMachine:
             }
 
     def _blank_worker_states(self) -> list[dict[str, str | int | None]]:
-        worker_count = max(1, get_settings().machine_workers)
         return [
             {
-                "worker_id": index + 1,
+                "worker_id": spec["worker_id"],
+                "role": spec["label"],
                 "ticker": None,
-                "status": "idle",
-                "last_action": "idle",
+                "status": "standby",
+                "last_action": "standby",
                 "last_completed_ticker": None,
             }
-            for index in range(worker_count)
+            for spec in _worker_role_specs(max(1, get_settings().machine_workers))
         ]
 
     def _set_worker_state(
         self,
         worker_index: int,
         *,
+        role: str | None = None,
         ticker: str | None = None,
         status: str | None = None,
         last_action: str | None = None,
@@ -167,14 +222,17 @@ class ContinuousResearchMachine:
                 self._snapshot.worker_states.append(
                     {
                         "worker_id": next_id,
+                        "role": _worker_role_specs(next_id)[next_id - 1]["label"],
                         "ticker": None,
-                        "status": "idle",
-                        "last_action": "idle",
+                        "status": "standby",
+                        "last_action": "standby",
                         "last_completed_ticker": None,
                     }
                 )
             state = self._snapshot.worker_states[worker_index]
-            if ticker is not None or status == "idle":
+            if role is not None:
+                state["role"] = role
+            if ticker is not None or status in {"idle", "standby", "complete"}:
                 state["ticker"] = ticker
             if status is not None:
                 state["status"] = status
@@ -215,13 +273,13 @@ class ContinuousResearchMachine:
             try:
                 self._sync_universes_if_needed(session)
                 progress = self._refresh_progress_snapshot(session)
-                work_items = self._load_work_batch(session)
+                assignments = self._load_role_assignments(session)
             finally:
                 session.close()
 
             processed: list[str] = []
-            if work_items:
-                processed = self._process_work_batch(factory, work_items)
+            if assignments:
+                processed = self._process_role_assignments(factory, assignments)
 
             summary_session = factory()
             try:
@@ -276,107 +334,209 @@ class ContinuousResearchMachine:
             self._snapshot.last_universe_sync_date = today
             self._snapshot.last_action = f"synced universes ({sum(counts.values())} symbols)"
 
-    def _load_work_batch(self, session: Session) -> list[tuple[Any, str]]:
-        settings = get_settings()
-        batch_size = max(1, settings.machine_batch_size)
-        worker_count = max(1, settings.machine_workers)
-        limit = max(batch_size, worker_count)
-        oversample = max(limit * 12, 250)
+    def _load_role_assignments(self, session: Session) -> list[dict[str, Any]]:
+        inventory = self._load_role_inventory(session)
+        assignments: list[dict[str, Any]] = []
+        reserved_company_ids: set[Any] = set()
+        for spec in _worker_role_specs(max(1, get_settings().machine_workers)):
+            lane, row = self._pick_role_assignment(inventory, spec, reserved_company_ids)
+            company_id = row["company_id"] if row is not None else None
+            ticker = row["ticker"] if row is not None else None
+            if company_id is not None:
+                reserved_company_ids.add(company_id)
+            assignments.append(
+                {
+                    "worker_id": spec["worker_id"],
+                    "role": spec["label"],
+                    "lane": lane,
+                    "company_id": company_id,
+                    "ticker": ticker,
+                }
+            )
+        return assignments
 
-        pending_stmt: Select[Any] = (
-            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
+    def _load_role_inventory(self, session: Session) -> list[dict[str, Any]]:
+        filing_counts = (
+            select(
+                Filing.company_id.label("company_id"),
+                func.count(Filing.id).label("filings_count"),
+            )
+            .group_by(Filing.company_id)
+            .subquery()
+        )
+        raw_fact_counts = (
+            select(
+                RawFact.company_id.label("company_id"),
+                func.count(RawFact.id).label("raw_facts_count"),
+            )
+            .group_by(RawFact.company_id)
+            .subquery()
+        )
+        canonical_counts = (
+            select(
+                CanonicalFact.company_id.label("company_id"),
+                func.count(CanonicalFact.id).label("canonical_count"),
+            )
+            .group_by(CanonicalFact.company_id)
+            .subquery()
+        )
+        statement_counts = (
+            select(
+                StatementSnapshot.company_id.label("company_id"),
+                func.count(StatementSnapshot.id).label("statement_count"),
+            )
+            .group_by(StatementSnapshot.company_id)
+            .subquery()
+        )
+        stmt: Select[Any] = (
+            select(
+                Company.id.label("company_id"),
+                Security.ticker.label("ticker"),
+                Company.name.label("company_name"),
+                Company.entity_type.label("entity_type"),
+                Security.security_type.label("security_type"),
+                CompanyReport.id.label("report_id"),
+                CompanyReport.pipeline_stage.label("pipeline_stage"),
+                CompanyReport.updated_at.label("report_updated_at"),
+                func.coalesce(filing_counts.c.filings_count, 0).label("filings_count"),
+                func.coalesce(raw_fact_counts.c.raw_facts_count, 0).label("raw_facts_count"),
+                func.coalesce(canonical_counts.c.canonical_count, 0).label("canonical_count"),
+                func.coalesce(statement_counts.c.statement_count, 0).label("statement_count"),
+            )
             .join(Security, Security.company_id == Company.id)
             .outerjoin(CompanyReport, CompanyReport.company_id == Company.id)
-            .where(CompanyReport.id.is_(None))
+            .outerjoin(filing_counts, filing_counts.c.company_id == Company.id)
+            .outerjoin(raw_fact_counts, raw_fact_counts.c.company_id == Company.id)
+            .outerjoin(canonical_counts, canonical_counts.c.company_id == Company.id)
+            .outerjoin(statement_counts, statement_counts.c.company_id == Company.id)
             .order_by(Security.ticker.asc())
-            .limit(oversample)
         )
-        pending_rows = _filter_priority_rows(session.execute(pending_stmt).all(), limit=limit)
-        if pending_rows:
-            return pending_rows
+        return [dict(row._mapping) for row in session.execute(stmt).all()]
 
-        deepening_stmt: Select[Any] = (
-            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
-            .join(Security, Security.company_id == Company.id)
-            .join(CompanyReport, CompanyReport.company_id == Company.id)
-            .where(CompanyReport.pipeline_stage.not_in(["reports-ready", "parked"]))
-            .order_by(CompanyReport.updated_at.asc(), Security.ticker.asc())
-            .limit(max(worker_count * 12, 250))
-        )
-        deepening_rows = _filter_priority_rows(session.execute(deepening_stmt).all(), limit=worker_count)
-        if deepening_rows:
-            return deepening_rows
+    def _pick_role_assignment(
+        self,
+        inventory: list[dict[str, Any]],
+        spec: dict[str, Any],
+        reserved_company_ids: set[Any],
+    ) -> tuple[str, dict[str, Any] | None]:
+        lanes = [spec["primary_lane"], *spec.get("fallback_lanes", [])]
+        for lane in lanes:
+            candidates = self._lane_candidates(inventory, lane, reserved_company_ids)
+            if candidates:
+                return lane, candidates[0]
+        return spec["primary_lane"], None
 
-        refresh_stmt: Select[Any] = (
-            select(Company.id, Security.ticker, Company.name, Company.entity_type, Security.security_type)
-            .join(Security, Security.company_id == Company.id)
-            .join(CompanyReport, CompanyReport.company_id == Company.id)
-            .where(CompanyReport.pipeline_stage == "reports-ready")
-            .order_by(CompanyReport.updated_at.asc(), Security.ticker.asc())
-            .limit(max(worker_count * 12, 250))
-        )
-        return _filter_priority_rows(session.execute(refresh_stmt).all(), limit=worker_count)
+    def _lane_candidates(
+        self,
+        inventory: list[dict[str, Any]],
+        lane: str,
+        reserved_company_ids: set[Any],
+    ) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for row in inventory:
+            if row["company_id"] in reserved_company_ids:
+                continue
+            if not _is_priority_operating_equity(
+                ticker=row["ticker"],
+                company_name=row["company_name"],
+                entity_type=row["entity_type"],
+                security_type=row["security_type"],
+            ):
+                continue
+            if row["pipeline_stage"] == "parked":
+                continue
+            if lane == "filings" or lane == "companyfacts" and row["filings_count"] > 0 and row["raw_facts_count"] == 0 or lane == "canonical" and row["raw_facts_count"] > 0 and row["canonical_count"] == 0 or lane == "statements" and row["canonical_count"] > 0 and row["statement_count"] == 0 or lane == "report-build" and row["canonical_count"] > 0 and (
+                row["report_id"] is None or row["pipeline_stage"] != "reports-ready"
+            ) or lane == "report-refresh" and row["canonical_count"] > 0 and row["pipeline_stage"] == "reports-ready" or lane == "strategy" and row["report_id"] is not None and row["pipeline_stage"] == "reports-ready":
+                candidates.append(row)
 
-    def _process_work_batch(
+        return sorted(candidates, key=lambda row: _lane_sort_key(lane, row))
+
+    def _process_role_assignments(
         self,
         factory,
-        work_items: list[tuple[Any, str]],
+        assignments: list[dict[str, Any]],
     ) -> list[str]:
-        worker_count = min(max(1, get_settings().machine_workers), len(work_items))
-        queue = deque(work_items)
-        queue_lock = threading.Lock()
         processed: list[str] = []
         processed_lock = threading.Lock()
 
-        def _worker(worker_index: int) -> None:
-            while not self._stop.is_set():
-                with queue_lock:
-                    if not queue:
-                        self._set_worker_state(
-                            worker_index,
-                            ticker=None,
-                            status="idle",
-                            last_action="idle",
-                        )
-                        return
-                    company_id, ticker = queue.popleft()
+        def _worker(assignment: dict[str, Any]) -> None:
+            worker_index = max(0, int(assignment["worker_id"]) - 1)
+            role = str(assignment["role"])
+            lane = str(assignment["lane"])
+            company_id = assignment["company_id"]
+            ticker = assignment["ticker"]
+            if company_id is None or ticker is None:
                 self._set_worker_state(
                     worker_index,
-                    ticker=ticker,
-                    status="processing",
-                    last_action=f"processing {ticker}",
+                    role=role,
+                    ticker=None,
+                    status="standby",
+                    last_action="queue drained" if self._snapshot.pending_companies == 0 else f"standby {lane}",
                 )
-                session = factory()
-                try:
-                    company = session.get(Company, company_id)
-                    if company is None:
-                        self._set_worker_state(
-                            worker_index,
-                            ticker=None,
-                            status="idle",
-                            last_action="company missing",
-                        )
-                        continue
-                    self._process_company(session, company, ticker, worker_index)
+                return
+            self._set_worker_state(
+                worker_index,
+                role=role,
+                ticker=ticker,
+                status="processing",
+                last_action=f"{lane} {ticker}",
+            )
+            session = factory()
+            try:
+                company = session.get(Company, company_id)
+                if company is None:
+                    self._set_worker_state(
+                        worker_index,
+                        role=role,
+                        ticker=None,
+                        status="standby",
+                        last_action="company missing",
+                    )
+                    return
+                processed_ticker = self._process_company_lane(
+                    session,
+                    company,
+                    ticker,
+                    worker_index,
+                    lane=lane,
+                    role=role,
+                )
+                if processed_ticker:
                     with processed_lock:
-                        processed.append(ticker)
+                        processed.append(processed_ticker)
                     with self._lock:
-                        self._snapshot.last_processed_ticker = ticker
-                        self._snapshot.last_action = f"processed {ticker}"
+                        self._snapshot.last_processed_ticker = processed_ticker
+                        self._snapshot.last_action = f"processed {processed_ticker}"
                         self._snapshot.last_cycle_at = datetime.now(UTC).isoformat()
                     self._set_worker_state(
                         worker_index,
+                        role=role,
                         ticker=None,
                         status="complete",
-                        last_action=f"processed {ticker}",
+                        last_action=f"{lane} {processed_ticker}",
+                        last_completed_ticker=processed_ticker,
+                    )
+                else:
+                    self._set_worker_state(
+                        worker_index,
+                        role=role,
+                        ticker=None,
+                        status="standby",
+                        last_action=f"standby {lane}",
                         last_completed_ticker=ticker,
                     )
-                finally:
-                    session.close()
+            finally:
+                session.close()
 
         threads = [
-            threading.Thread(target=_worker, args=(index,), daemon=True, name=f"accountant-report-worker-{index + 1}")
-            for index in range(worker_count)
+            threading.Thread(
+                target=_worker,
+                args=(assignment,),
+                daemon=True,
+                name=f"accountant-report-worker-{assignment['worker_id']}",
+            )
+            for assignment in assignments
         ]
         for thread in threads:
             thread.start()
@@ -384,12 +544,227 @@ class ContinuousResearchMachine:
             thread.join()
         return processed
 
+    def _process_company_lane(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        lane: str,
+        role: str,
+    ) -> str | None:
+        if lane == "filings":
+            return ticker if self._refresh_company_filings(session, company, ticker, worker_index, role=role) else None
+        if lane == "companyfacts":
+            return ticker if self._refresh_companyfacts(session, company, ticker, worker_index, role=role) else None
+        if lane == "canonical":
+            return ticker if self._normalize_company_lane(session, company, ticker, worker_index, role=role) else None
+        if lane == "statements":
+            return ticker if self._build_statements_lane(session, company, ticker, worker_index, role=role) else None
+        if lane in {"report-build", "report-refresh"}:
+            return ticker if self._build_report_lane(session, company, ticker, worker_index, role=role) else None
+        if lane == "strategy":
+            return ticker if self._refresh_strategy_lane(session, company, ticker, worker_index, role=role) else None
+        return None
+
+    def _refresh_company_filings(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        self._mark_progress(f"refreshing filings {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"refreshing filings {ticker}")
+        try:
+            with SecClient() as sec_client:
+                filing_payload = fetch_company_filings_payload(sec_client, ticker)
+            with sqlite_write_guard():
+                ingest_company_filings_payload(session, filing_payload)
+                session.commit()
+            return True
+        except TickerNotFoundError as exc:
+            session.rollback()
+            log.warning("machine.ticker_unresolved", ticker=ticker, error=_safe_error_text(exc))
+        except Exception as exc:
+            session.rollback()
+            log.warning("machine.filing_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+        return False
+
+    def _refresh_companyfacts(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        if _count(session, Filing, company.id) == 0:
+            return False
+        self._mark_progress(f"refreshing facts {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"refreshing facts {ticker}")
+        with SecClient() as sec_client:
+            companyfacts_client = CompanyFactsClient(get_settings(), sec_client=sec_client)
+            try:
+                facts_data = companyfacts_client.get_company_facts(company.cik)
+                with sqlite_write_guard():
+                    ingest_company_facts_payload(session, company, facts_data)
+                    session.commit()
+                return True
+            except SecHttpError as exc:
+                session.rollback()
+                if exc.status_code == 404:
+                    try:
+                        with sqlite_write_guard():
+                            self._build_partial_report(session, company, ticker, terminal_reason="companyfacts_404")
+                            session.commit()
+                        return True
+                    except Exception as build_exc:
+                        session.rollback()
+                        log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(build_exc)[:300])
+                else:
+                    log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+            except TickerNotFoundError as exc:
+                session.rollback()
+                log.warning("machine.ticker_unresolved", ticker=ticker, error=_safe_error_text(exc))
+            except Exception as exc:
+                session.rollback()
+                log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+            finally:
+                companyfacts_client.close()
+        return False
+
+    def _normalize_company_lane(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        raw_facts_count = _count(session, RawFact, company.id)
+        if raw_facts_count == 0:
+            return False
+        if _count(session, CanonicalFact, company.id) > 0:
+            return False
+        self._mark_progress(f"canonicalizing {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"canonicalizing {ticker}")
+        try:
+            with sqlite_write_guard():
+                self._normalize_company(session, company)
+                session.commit()
+            canonical_count = _count(session, CanonicalFact, company.id)
+            if canonical_count == 0:
+                with sqlite_write_guard():
+                    self._build_partial_report(
+                        session,
+                        company,
+                        ticker,
+                        terminal_reason="zero_canonical_after_normalize",
+                    )
+                    session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            log.warning("machine.normalize_skipped", ticker=ticker, error=str(exc)[:300])
+        return False
+
+    def _build_statements_lane(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        if _count(session, CanonicalFact, company.id) == 0:
+            return False
+        if _count(session, StatementSnapshot, company.id) > 0:
+            return False
+        self._mark_progress(f"building statements {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"building statements {ticker}")
+        try:
+            with sqlite_write_guard():
+                build_company_statement_snapshots(session, company.id)
+                session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            log.warning("machine.statement_snapshot_build_failed", ticker=ticker, error=str(exc)[:300])
+        return False
+
+    def _build_report_lane(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        filings_count = _count(session, Filing, company.id)
+        raw_facts_count = _count(session, RawFact, company.id)
+        canonical_count = _count(session, CanonicalFact, company.id)
+        report = _latest_company_report(session, company.id)
+        if canonical_count == 0:
+            if filings_count > 0 and ((raw_facts_count > 0 and report is None) or raw_facts_count == 0):
+                self._mark_progress(f"seeding partial report {ticker}")
+                self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"seeding partial report {ticker}")
+                try:
+                    with sqlite_write_guard():
+                        self._build_partial_report(session, company, ticker)
+                        session.commit()
+                    return True
+                except Exception as exc:
+                    session.rollback()
+                    log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(exc)[:300])
+            return False
+        self._mark_progress(f"building report {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"building report {ticker}")
+        try:
+            with sqlite_write_guard():
+                self._build_report(session, company, ticker)
+                session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            log.warning("machine.report_build_failed", ticker=ticker, error=str(exc)[:300])
+        return False
+
+    def _refresh_strategy_lane(
+        self,
+        session: Session,
+        company: Company,
+        ticker: str,
+        worker_index: int,
+        *,
+        role: str,
+    ) -> bool:
+        report = _latest_company_report(session, company.id)
+        if report is None or report.pipeline_stage != "reports-ready":
+            return False
+        self._mark_progress(f"classifying {ticker}")
+        self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"classifying {ticker}")
+        try:
+            with sqlite_write_guard():
+                sync_buy_board_candidate(session, report)
+                session.commit()
+            return True
+        except Exception as exc:
+            session.rollback()
+            log.warning("machine.strategy_refresh_failed", ticker=ticker, error=str(exc)[:300])
+        return False
+
     def _process_company(self, session: Session, company: Company, ticker: str, worker_index: int) -> None:
         self._mark_progress(f"processing {ticker}")
         companyfacts_terminal_404 = False
-        existing_report = session.execute(
-            select(CompanyReport).where(CompanyReport.company_id == company.id)
-        ).scalar_one_or_none()
+        existing_report = _latest_company_report(session, company.id)
         if existing_report is not None and existing_report.pipeline_stage == "parked":
             self._set_worker_state(worker_index, ticker=ticker, status="idle", last_action=f"parked {ticker}")
             return
@@ -438,7 +813,7 @@ class ContinuousResearchMachine:
                         session.commit()
         filings_count = _count(session, Filing, company.id)
         raw_facts_count = _count(session, RawFact, company.id)
-        report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
+        report = _latest_company_report(session, company.id)
         if filings_count > 0 and ((raw_facts_count > 0 and report is None) or companyfacts_terminal_404):
             self._set_worker_state(worker_index, ticker=ticker, status="processing", last_action=f"seeding partial report {ticker}")
             self._mark_progress(f"seeding partial report {ticker}")
@@ -621,7 +996,7 @@ class ContinuousResearchMachine:
         ).scalar_one_or_none()
         latest_filing = latest_filing_row.filing_date if latest_filing_row else None
 
-        report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
+        report = _latest_company_report(session, company.id)
         if report is None:
             report = CompanyReport(
                 company_id=company.id,
@@ -693,6 +1068,8 @@ class ContinuousResearchMachine:
             "report_machine": "V2_CONTINUOUS_MACHINE_PARTIAL",
             "terminal_reason": terminal_reason or "",
         }
+        session.flush()
+        upsert_company_bottleneck_snapshot(session, company=company, report=report)
 
     def _build_report(self, session: Session, company: Company, ticker: str) -> None:
         filings = session.execute(
@@ -703,7 +1080,12 @@ class ContinuousResearchMachine:
         facts = session.execute(
             select(RawFact)
             .where(RawFact.company_id == company.id)
-            .order_by(RawFact.period_end.desc(), RawFact.filed_date.desc(), RawFact.created_at.desc())
+            .order_by(
+                RawFact.period_end.desc(),
+                RawFact.accepted_at.desc().nullslast(),
+                RawFact.filed_date.desc().nullslast(),
+                RawFact.created_at.desc(),
+            )
         ).scalars().all()
         filings_count = len(filings)
         raw_facts_count = len(facts)
@@ -735,26 +1117,62 @@ class ContinuousResearchMachine:
             sec_user_agent=get_settings().sec_user_agent,
         )
 
-        revenue_series = _series(facts, [
-            "RevenueFromContractWithCustomerExcludingAssessedTax",
-            "Revenues",
-            "SalesRevenueNet",
-        ])
-        net_income_series = _series(facts, ["NetIncomeLoss"])
-        assets_series = _series(facts, ["Assets"])
-        liabilities_series = _series(facts, ["Liabilities"])
-        equity_series = _series(facts, ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"])
-        ocf_series = _series(facts, ["NetCashProvidedByUsedInOperatingActivities"])
-        capex_series = _series(facts, ["PaymentsToAcquirePropertyPlantAndEquipment"])
+        revenue_quarterly_series = _series(
+            facts,
+            [
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "Revenues",
+                "SalesRevenueNet",
+            ],
+            period="quarterly",
+        )
+        revenue_annual_series = _series(
+            facts,
+            [
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "Revenues",
+                "SalesRevenueNet",
+            ],
+            period="annual",
+        )
+        net_income_quarterly_series = _series(facts, ["NetIncomeLoss"], period="quarterly")
+        net_income_annual_series = _series(facts, ["NetIncomeLoss"], period="annual")
+        assets_series = _series(facts, ["Assets"], period="instant")
+        liabilities_series = _series(facts, ["Liabilities"], period="instant")
+        equity_series = _series(
+            facts,
+            ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+            period="instant",
+        )
+        ocf_quarterly_series = _series(
+            facts,
+            ["NetCashProvidedByUsedInOperatingActivities"],
+            period="quarterly",
+        )
+        ocf_annual_series = _series(
+            facts,
+            ["NetCashProvidedByUsedInOperatingActivities"],
+            period="annual",
+        )
+        capex_quarterly_series = _series(
+            facts,
+            ["PaymentsToAcquirePropertyPlantAndEquipment"],
+            period="quarterly",
+        )
+        capex_annual_series = _series(
+            facts,
+            ["PaymentsToAcquirePropertyPlantAndEquipment"],
+            period="annual",
+        )
 
-        revenue = _first_value(revenue_series)
-        prior_revenue = _nth_value(revenue_series, 1)
-        net_income = _first_value(net_income_series)
+        revenue = _first_value(revenue_quarterly_series) or _first_value(revenue_annual_series)
+        prior_revenue = _comparable_prior_value(revenue_quarterly_series) or _comparable_prior_value(revenue_annual_series)
+        net_income = _first_value(net_income_quarterly_series) or _first_value(net_income_annual_series)
         assets = _first_value(assets_series)
         liabilities = _first_value(liabilities_series)
         equity = _first_value(equity_series)
-        ocf = _first_value(ocf_series)
-        capex = _first_value(capex_series)
+        ocf = _first_value(ocf_quarterly_series) or _first_value(ocf_annual_series)
+        capex = _first_value(capex_quarterly_series) or _first_value(capex_annual_series)
         diluted_shares = _latest_fact_from_concepts(
             facts,
             [
@@ -763,6 +1181,7 @@ class ContinuousResearchMachine:
                 "WeightedAverageNumberOfSharesOutstandingBasic",
                 "CommonStockSharesOutstanding",
             ],
+            period="instant",
         )
 
         revenue_growth_pct = _pct_change(revenue, prior_revenue)
@@ -780,18 +1199,17 @@ class ContinuousResearchMachine:
             owner_earnings_margin_pct *= 100
         dilution_growth_pct = None
         if diluted_shares is not None:
-            prior_shares = _nth_value(
-                _series(
-                    facts,
-                    [
-                        "WeightedAverageNumberOfDilutedSharesOutstanding",
-                        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-                        "WeightedAverageNumberOfSharesOutstandingBasic",
-                        "CommonStockSharesOutstanding",
-                    ],
-                ),
-                1,
+            share_series = _series(
+                facts,
+                [
+                    "WeightedAverageNumberOfDilutedSharesOutstanding",
+                    "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+                    "WeightedAverageNumberOfSharesOutstandingBasic",
+                    "CommonStockSharesOutstanding",
+                ],
+                period="instant",
             )
+            prior_shares = _comparable_prior_value(share_series)
             dilution_growth_pct = _pct_change(diluted_shares, prior_shares)
 
         metric_names = {
@@ -932,6 +1350,7 @@ class ContinuousResearchMachine:
             f"Data quality tier: {quality.overall_tier} at {quality.overall_coverage_pct:.1f}% overall coverage.",
             f"Revenue growth: {_fmt_pct(revenue_growth_pct)} | Owner earnings proxy: {_fmt_num(owner_earnings)} | Leverage: {_fmt_pct(leverage_ratio * 100 if leverage_ratio is not None else None)}.",
             f"Factor pack ({factor_pack.period_label}): Beneish {_fmt_num(factor_pack.beneish_m_score)} | Piotroski {_fmt_num(float(factor_pack.piotroski_f_score) if factor_pack.piotroski_f_score is not None else None)} | Altman {_fmt_num(factor_pack.altman_z_score)}.",
+            f"A-HIS ledger: {_fmt_num(factor_pack.a_his_score)} / 100 | QoE {_fmt_num((factor_pack.a_his_breakdown or {}).get('quality_of_earnings'))} | TIE {_fmt_num((factor_pack.a_his_breakdown or {}).get('times_interest_earned'))}.",
             f"Forecast pack: rev next year {_fmt_pct(revenue_forecast_next_year_pct)} | EPS forecast {_fmt_num(eps_forecast)} | confidence {forecast_confidence_pct:.1f}%.",
         ]
         if non_gaap_signal_bundle.non_gaap_eps is not None:
@@ -981,12 +1400,19 @@ class ContinuousResearchMachine:
             },
         )
 
-        report = session.execute(select(CompanyReport).where(CompanyReport.company_id == company.id)).scalar_one_or_none()
+        report = _latest_company_report(session, company.id)
         if report is None:
             report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=date.today().isoformat(), stance=stance)
             session.add(report)
-        current_price = _safe_float(report.current_price)
+        current_price = _resolved_current_price(ticker, fallback=_safe_float(report.current_price))
         market_cap = (current_price * diluted_shares) if current_price is not None and diluted_shares is not None else None
+        route = route_company(
+            gics_sector=gics_sector,
+            sic_description=company.sic_description,
+            revenue=revenue,
+            owner_earnings=owner_earnings,
+            net_income=net_income,
+        )
         report.ticker = ticker
         report.company_name = company.name
         report.as_of_date = date.today().isoformat()
@@ -1027,6 +1453,8 @@ class ContinuousResearchMachine:
             "external_financing_ratio": _maybe_round(factor_pack.external_financing_ratio),
             "factor_quality_score": _maybe_round(factor_pack.factor_quality_score),
             "factor_forensic_risk_score": _maybe_round(factor_pack.factor_forensic_risk_score),
+            "a_his_score": _maybe_round(factor_pack.a_his_score),
+            "a_his_breakdown": factor_pack.a_his_breakdown,
             "factor_warning_count": len(factor_pack.warnings),
             "eps": _maybe_round(eps),
             "eps_forecast": _maybe_round(eps_forecast),
@@ -1045,6 +1473,11 @@ class ContinuousResearchMachine:
             "accounting_quality_score": accounting_quality_score,
             "future_bucket": future_bucket,
             "future_reason": future_reason,
+            "gics_sector": gics_sector,
+            "gics_industry": gics_industry,
+            "route_family": route.family,
+            "route_reason": route.reason,
+            "lane1_supported": route.lane1_supported,
         }
         report.highlights = highlights
         report.report_markdown = report_markdown
@@ -1053,6 +1486,7 @@ class ContinuousResearchMachine:
             "classification": research.rule_version,
             "data_quality": quality.assessment_version,
             "factors": factor_pack.factor_version,
+            "accounting_ledger_overlay": "A_HIS_LEDGER_V1",
         }
         standardized_financials = {
             "revenue": _maybe_round(revenue),
@@ -1105,55 +1539,65 @@ class ContinuousResearchMachine:
             "fcf_derived": _maybe_round(owner_earnings),
             "rpo_disclosed": _maybe_round(_latest_fact_from_concepts(facts, ["RemainingPerformanceObligation"])),
         }
-        receivables_series = _series(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"])
-        deferred_revenue_series = _series(facts, ["DeferredRevenueCurrent", "ContractWithCustomerLiabilityCurrent"])
-        sga_series = _series(facts, ["SellingGeneralAndAdministrativeExpense"])
-        tax_expense_series = _series(facts, ["IncomeTaxExpenseBenefit"])
-        pretax_income_series = _series(facts, ["IncomeBeforeTaxExpenseBenefit"])
+        receivables_series = _series(
+            facts,
+            ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"],
+            period="instant",
+        )
+        deferred_revenue_series = _series(
+            facts,
+            ["DeferredRevenueCurrent", "ContractWithCustomerLiabilityCurrent"],
+            period="instant",
+        )
+        inventory_series = _series(facts, ["InventoryNet"], period="instant")
+        cogs_quarterly_series = _series(
+            facts,
+            ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"],
+            period="quarterly",
+        )
+        cogs_annual_series = _series(
+            facts,
+            ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"],
+            period="annual",
+        )
+        sga_quarterly_series = _series(facts, ["SellingGeneralAndAdministrativeExpense"], period="quarterly")
+        sga_annual_series = _series(facts, ["SellingGeneralAndAdministrativeExpense"], period="annual")
+        tax_expense_annual_series = _series(facts, ["IncomeTaxExpenseBenefit"], period="annual")
+        pretax_income_annual_series = _series(facts, ["IncomeBeforeTaxExpenseBenefit"], period="annual")
+        current_receivables = _first_value(receivables_series)
+        prior_receivables = _comparable_prior_value(receivables_series)
+        current_deferred_revenue = _first_value(deferred_revenue_series)
+        prior_deferred_revenue = _comparable_prior_value(deferred_revenue_series)
+        current_inventory = _first_value(inventory_series)
+        prior_inventory = _comparable_prior_value(inventory_series)
+        current_cogs = _first_value(cogs_quarterly_series) or _first_value(cogs_annual_series)
+        prior_cogs = _comparable_prior_value(cogs_quarterly_series) or _comparable_prior_value(cogs_annual_series)
+        current_sga = _first_value(sga_quarterly_series) or _first_value(sga_annual_series)
+        prior_sga = _comparable_prior_value(sga_quarterly_series) or _comparable_prior_value(sga_annual_series)
+        prior_capex = _comparable_prior_value(capex_quarterly_series) or _comparable_prior_value(capex_annual_series)
+        current_dso = _safe_divide(current_receivables * 365 if current_receivables is not None else None, revenue)
+        prior_dso = _safe_divide(prior_receivables * 365 if prior_receivables is not None else None, prior_revenue)
         growth_trend_deltas = {
             "revenue_yoy_growth": _maybe_round(revenue_growth_pct),
-            "receivables_yoy_growth": _maybe_round(_pct_change(
-                _latest_fact_from_concepts(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"]),
-                _nth_value(receivables_series, 1),
-            )),
-            "dso": _maybe_round(_safe_divide(
-                _latest_fact_from_concepts(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"]) * 365
-                if _latest_fact_from_concepts(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"]) is not None else None,
-                revenue,
-            )),
-            "dso_delta_yoy": _maybe_round(_pct_change(
-                _safe_divide(
-                    _latest_fact_from_concepts(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"]) * 365
-                    if _latest_fact_from_concepts(facts, ["AccountsReceivableNetCurrent", "ReceivablesNetCurrent"]) is not None else None,
-                    revenue,
-                ),
-                _safe_divide(_nth_value(receivables_series, 1), prior_revenue / 365 if prior_revenue not in (None, 0) else None),
-            )),
-            "inventory_yoy_growth": _maybe_round(_pct_change(
-                _latest_fact_from_concepts(facts, ["InventoryNet"]),
-                _nth_value(_series(facts, ["InventoryNet"]), 1),
-            )),
-            "cogs_yoy_growth": _maybe_round(_pct_change(
-                _latest_fact_from_concepts(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"]),
-                _nth_value(_series(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"]), 1),
-            )),
-            "deferred_rev_yoy_growth": _maybe_round(_pct_change(
-                _latest_fact_from_concepts(facts, ["DeferredRevenueCurrent", "ContractWithCustomerLiabilityCurrent"]),
-                _nth_value(deferred_revenue_series, 1),
-            )),
+            "receivables_yoy_growth": _maybe_round(_pct_change(current_receivables, prior_receivables)),
+            "dso": _maybe_round(current_dso),
+            "dso_delta_yoy": _maybe_round(_pct_change(current_dso, prior_dso)),
+            "inventory_yoy_growth": _maybe_round(_pct_change(current_inventory, prior_inventory)),
+            "cogs_yoy_growth": _maybe_round(_pct_change(current_cogs, prior_cogs)),
+            "deferred_rev_yoy_growth": _maybe_round(_pct_change(current_deferred_revenue, prior_deferred_revenue)),
             "sga_pct_revenue": _maybe_round(_ratio_pct(
-                _latest_fact_from_concepts(facts, ["SellingGeneralAndAdministrativeExpense"]),
+                current_sga,
                 revenue,
                 ceiling=1000.0,
             )),
             "sga_pct_revenue_delta": _maybe_round(_pct_change(
-                _safe_divide(_latest_fact_from_concepts(facts, ["SellingGeneralAndAdministrativeExpense"]), revenue),
-                _safe_divide(_nth_value(sga_series, 1), prior_revenue),
+                _safe_divide(current_sga, revenue),
+                _safe_divide(prior_sga, prior_revenue),
             )),
             "capex_intensity_pct_rev": _maybe_round(_ratio_pct(abs(capex) if capex is not None else None, revenue, ceiling=1000.0)),
             "capex_intensity_delta": _maybe_round(_pct_change(
                 _safe_divide(abs(capex) if capex is not None else None, revenue),
-                _safe_divide(abs(_nth_value(capex_series, 1)) if _nth_value(capex_series, 1) is not None else None, prior_revenue),
+                _safe_divide(abs(prior_capex) if prior_capex is not None else None, prior_revenue),
             )),
             "gross_margin": _maybe_round(gross_margin_pct),
             "buyback_yield": _maybe_round(_ratio_pct(
@@ -1168,8 +1612,8 @@ class ContinuousResearchMachine:
                 ceiling=200.0,
             )),
             "effective_tax_rate_3yr_avg": _maybe_round(_rolling_average([
-                _safe_divide(_nth_value(tax_expense_series, index), _nth_value(pretax_income_series, index))
-                for index in range(3)
+                _safe_divide(_nth_value(tax_expense_annual_series, index), _nth_value(pretax_income_annual_series, index))
+                for index in range(min(3, len(tax_expense_annual_series), len(pretax_income_annual_series)))
             ], multiplier=100.0)),
             "cash_tax_vs_book_tax_gap": _maybe_round(_ratio_pct(
                 _latest_fact_from_concepts(facts, ["IncomeTaxesPaidNet"]),
@@ -1208,6 +1652,8 @@ class ContinuousResearchMachine:
             "margin_trajectory_subscore": _maybe_round(margin_forecast_pct),
             "balance_sheet_strength_subscore": _maybe_round(balance_score),
             "red_flag_penalty": _maybe_round(forensic_risk_score),
+            "a_his_score": _maybe_round(factor_pack.a_his_score),
+            "a_his_breakdown": factor_pack.a_his_breakdown,
             "composite_locked_asof": latest_filing.isoformat() if latest_filing else date.today().isoformat(),
         }
         section_payloads = {
@@ -1339,6 +1785,9 @@ class ContinuousResearchMachine:
             "schema_version": "report_card_v2",
             "pipeline_run_id": f"{company.cik}:{latest_filing_row.accession_number}" if latest_filing_row else company.cik,
             "current_action": grading.action,
+            "route_family": route.family,
+            "route_reason": route.reason,
+            "lane1_supported": route.lane1_supported,
             "veto_triggered": bool(grading.veto_triggered or research.classification == "REJECTED_BY_RULES"),
             "veto_reason": grading.veto_reason or ("classification rejected by rules" if research.classification == "REJECTED_BY_RULES" else None),
             "last_scored_ts": datetime.now(UTC).isoformat(),
@@ -1357,9 +1806,11 @@ class ContinuousResearchMachine:
                 "canonical_score_value": _maybe_round(grading.grade_score),
                 "intermediate_scores": {
                     "factor_quality_score": _maybe_round(factor_pack.factor_quality_score),
+                    "a_his_score": _maybe_round(factor_pack.a_his_score),
                     "legacy_composite_score": _maybe_round(composite_score),
                     "pqc": _maybe_round(grading.pqc),
                 },
+                "accounting_ledger_overlay": factor_pack.a_his_breakdown,
                 "pqc_inputs": {
                     "profitability_persistence": _maybe_round(_percentile_proxy(factor_pack.cash_based_operating_profitability or 0.0, scale=180.0, baseline=50.0)),
                     "capital_allocation": _maybe_round(balance_score),
@@ -1427,6 +1878,7 @@ class ContinuousResearchMachine:
         )
         session.flush()
         sync_buy_board_candidate(session, report)
+        upsert_company_bottleneck_snapshot(session, company=company, report=report)
         session.flush()
 
 
@@ -1434,18 +1886,45 @@ def _count(session: Session, model: Any, company_id: Any) -> int:
     return int(session.execute(select(func.count()).select_from(model).where(model.company_id == company_id)).scalar_one())
 
 
-def _series(facts: list[RawFact], concepts: list[str]) -> list[tuple[date | None, float]]:
+def _latest_company_report(session: Session, company_id: Any) -> CompanyReport | None:
+    return session.execute(
+        select(CompanyReport)
+        .where(CompanyReport.company_id == company_id)
+        .order_by(CompanyReport.updated_at.desc(), CompanyReport.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _series(
+    facts: list[RawFact],
+    concepts: list[str],
+    *,
+    period: str = "any",
+) -> list[tuple[date | None, float]]:
     concept_set = set(concepts)
-    items: list[tuple[date | None, float]] = []
-    seen_dates: set[date | None] = set()
+    best_by_period_end: dict[date | None, tuple[datetime, datetime, datetime, float]] = {}
     for fact in facts:
         if fact.concept not in concept_set or fact.value_numeric is None:
             continue
-        if fact.period_end in seen_dates:
+        if not _matches_period_kind(fact, period=period):
             continue
-        seen_dates.add(fact.period_end)
-        items.append((fact.period_end, float(Decimal(fact.value_numeric))))
-    return items
+        period_end = fact.period_end or fact.instant_date
+        filed_at = (
+            datetime.combine(fact.filed_date, datetime.min.time(), tzinfo=UTC)
+            if fact.filed_date is not None
+            else datetime.min.replace(tzinfo=UTC)
+        )
+        candidate = (
+            fact.accepted_at or filed_at,
+            filed_at,
+            fact.created_at or datetime.min.replace(tzinfo=UTC),
+            float(Decimal(fact.value_numeric)),
+        )
+        existing = best_by_period_end.get(period_end)
+        if existing is None or candidate[:3] > existing[:3]:
+            best_by_period_end[period_end] = candidate
+    ordered_periods = sorted(best_by_period_end.keys(), reverse=True)
+    return [(period_end, best_by_period_end[period_end][3]) for period_end in ordered_periods]
 
 
 def _first_value(series: list[tuple[date | None, float]]) -> float | None:
@@ -1454,6 +1933,31 @@ def _first_value(series: list[tuple[date | None, float]]) -> float | None:
 
 def _nth_value(series: list[tuple[date | None, float]], index: int) -> float | None:
     return series[index][1] if len(series) > index else None
+
+
+def _comparable_prior_index(
+    series: list[tuple[date | None, float]],
+    *,
+    min_days: int = 300,
+    max_days: int = 430,
+) -> int | None:
+    if not series or series[0][0] is None:
+        return None
+    current_period_end = series[0][0]
+    for index, (period_end, _value) in enumerate(series[1:], start=1):
+        if period_end is None:
+            continue
+        delta_days = (current_period_end - period_end).days
+        if min_days <= delta_days <= max_days:
+            return index
+    return None
+
+
+def _comparable_prior_value(series: list[tuple[date | None, float]]) -> float | None:
+    comparable_index = _comparable_prior_index(series)
+    if comparable_index is None:
+        return None
+    return _nth_value(series, comparable_index)
 
 
 def _pct_change(current: float | None, previous: float | None) -> float | None:
@@ -1479,12 +1983,50 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _latest_fact_from_concepts(facts: list[RawFact], concepts: list[str]) -> float | None:
-    concept_set = set(concepts)
-    for fact in facts:
-        if fact.concept in concept_set and fact.value_numeric is not None:
-            return float(Decimal(fact.value_numeric))
+def _latest_fact_from_concepts(
+    facts: list[RawFact],
+    concepts: list[str],
+    period: str = "any",
+) -> float | None:
+    series = _series(facts, concepts, period=period)
+    if series:
+        return series[0][1]
     return None
+
+
+def _matches_period_kind(fact: RawFact, *, period: str) -> bool:
+    if period == "any":
+        return True
+    duration_days = _fact_duration_days(fact)
+    if period == "instant":
+        return duration_days == 0
+    if duration_days is None:
+        return False
+    if period == "quarterly":
+        return 70 <= duration_days <= 110
+    if period == "annual":
+        return 320 <= duration_days <= 380
+    return False
+
+
+def _fact_duration_days(fact: RawFact) -> int | None:
+    if fact.period_start is None and (fact.period_end is not None or fact.instant_date is not None):
+        return 0
+    if fact.period_start is not None and fact.period_end is not None:
+        return (fact.period_end - fact.period_start).days
+    return None
+
+
+def _resolved_current_price(ticker: str, *, fallback: float | None) -> float | None:
+    payload = alpaca_quote(ticker)
+    if payload.get("ok"):
+        quote = payload.get("quote")
+        if isinstance(quote, dict):
+            for key in ("last", "close", "bid", "ask"):
+                price = _safe_float(quote.get(key))
+                if price is not None and price > 0:
+                    return price
+    return fallback
 
 
 def _safe_divide(numerator: float | None, denominator: float | None) -> float | None:
@@ -1565,6 +2107,53 @@ def _filter_priority_rows(rows: list[tuple[Any, str, str | None, str | None, str
     return fallback[:limit]
 
 
+def _worker_role_specs(worker_count: int) -> list[dict[str, Any]]:
+    count = max(1, worker_count)
+    specs: list[dict[str, Any]] = []
+    for index in range(count):
+        if index < len(_BASE_WORKER_ROLES):
+            base = dict(_BASE_WORKER_ROLES[index])
+        else:
+            overflow_index = index - len(_BASE_WORKER_ROLES) + 1
+            base = {
+                "role": f"reports-overflow-{overflow_index}",
+                "label": f"REPORTS X{overflow_index}",
+                "primary_lane": "report-build",
+                "fallback_lanes": ["report-refresh", "strategy"],
+            }
+        base["worker_id"] = index + 1
+        specs.append(base)
+    return specs
+
+
+def _lane_sort_key(lane: str, row: dict[str, Any]) -> tuple[Any, ...]:
+    filings_count = int(row.get("filings_count") or 0)
+    raw_facts_count = int(row.get("raw_facts_count") or 0)
+    canonical_count = int(row.get("canonical_count") or 0)
+    statement_count = int(row.get("statement_count") or 0)
+    report_missing = 0 if row.get("report_id") is None else 1
+    report_stage = str(row.get("pipeline_stage") or "")
+    report_updated_at = row.get("report_updated_at")
+    updated_rank = report_updated_at or datetime(1970, 1, 1, tzinfo=UTC)
+    ticker = str(row.get("ticker") or "")
+
+    if lane == "filings":
+        return (0 if filings_count == 0 else 1, report_missing, updated_rank, ticker)
+    if lane == "companyfacts":
+        return (0 if raw_facts_count == 0 else 1, updated_rank, ticker)
+    if lane == "canonical":
+        return (0 if canonical_count == 0 else 1, updated_rank, ticker)
+    if lane == "statements":
+        return (0 if statement_count == 0 else 1, updated_rank, ticker)
+    if lane == "report-build":
+        return (report_missing, 0 if report_stage != "reports-ready" else 1, updated_rank, ticker)
+    if lane == "report-refresh":
+        return (updated_rank, ticker)
+    if lane == "strategy":
+        return (updated_rank, ticker)
+    return (updated_rank, ticker)
+
+
 def _is_priority_operating_equity(
     *,
     ticker: str | None,
@@ -1585,9 +2174,7 @@ def _is_priority_operating_equity(
         return False
     if "-P" in normalized_ticker or normalized_ticker.endswith("-WT") or normalized_ticker.endswith("-WS"):
         return False
-    if len(normalized_ticker) >= 5 and normalized_ticker.endswith(("W", "U", "RT", "R")):
-        return False
-    return True
+    return not (len(normalized_ticker) >= 5 and normalized_ticker.endswith(("W", "U", "RT", "R")))
 
 
 def _security_rank(ticker: str | None) -> int:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -340,5 +341,5 @@ class ResearchDataQualityEngine:
             research_confidence_pct=research_confidence_pct,
             follow_up_actions=follow_ups,
             assessment_version=ResearchDataQualityEngine.DATA_QUALITY_VERSION,
-            created_at="2026-08-12",
+            created_at=datetime.now(UTC).isoformat(),
         )

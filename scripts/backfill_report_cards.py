@@ -23,11 +23,12 @@ def main() -> None:
     elif args.replace_ticker:
         _reset_report_cards_for_ticker(factory, args.replace_ticker)
 
+    missing_only = not args.reset and not args.replace_ticker and not args.all
     rows = _load_company_rows(
         factory,
         ticker=args.ticker or args.replace_ticker,
         limit=args.limit,
-        missing_only=not args.reset and not args.replace_ticker,
+        missing_only=missing_only,
     )
     started = datetime.now(UTC)
     processed = 0
@@ -35,7 +36,7 @@ def main() -> None:
     errors = 0
     print(
         f"[{started.isoformat()}] report-card rebuild starting "
-        f"companies={len(rows)} reset={args.reset} missing_only={not args.reset and not args.replace_ticker} workers={args.workers}",
+        f"companies={len(rows)} reset={args.reset} missing_only={missing_only} workers={args.workers}",
         flush=True,
     )
 
@@ -115,6 +116,7 @@ def _parse_args() -> argparse.Namespace:
         description="Backfill report_cards using the current report builder instead of the legacy thin-card mapper."
     )
     parser.add_argument("--reset", action="store_true", help="Delete existing report_cards first and fully rebuild them.")
+    parser.add_argument("--all", action="store_true", help="Rebuild all company report cards without deleting existing rows.")
     parser.add_argument("--ticker", type=str, help="Only rebuild one ticker.")
     parser.add_argument("--replace-ticker", type=str, help="Delete existing report_cards for one ticker, then rebuild it.")
     parser.add_argument("--limit", type=int, help="Maximum companies to rebuild.")

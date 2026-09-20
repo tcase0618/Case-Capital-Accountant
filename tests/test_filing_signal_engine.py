@@ -115,6 +115,33 @@ def test_build_event_red_flags_detects_comment_letters_and_turnover() -> None:
     assert signals.cfo_turnover_date == "2026-06-15"
 
 
+def test_build_event_red_flags_does_not_treat_generic_auditor_language_as_change() -> None:
+    filings = [
+        SimpleNamespace(
+            form_type="8-K",
+            filing_date=date(2026, 6, 15),
+            primary_document="form8k.htm",
+            primary_doc_description="Quarterly update with auditor reviewed controls",
+            source_url="eightk",
+        ),
+    ]
+    payloads = {
+        "eightk": """
+            The audit committee reviewed internal controls with the independent auditor.
+            The same accounting firm continues to serve the company.
+        """
+    }
+
+    signals = build_event_red_flags(
+        filings,
+        sec_user_agent="Case Capital Accountant test@example.com",
+        fetch_text=lambda url, _ua: payloads.get(url, ""),
+    )
+
+    assert signals.auditor_changed_flag is False
+    assert signals.auditor_change_date is None
+
+
 def test_extract_non_gaap_eps_and_audit_fee_ratio() -> None:
     text = """
         Non-GAAP diluted EPS was $2.15 for the quarter.

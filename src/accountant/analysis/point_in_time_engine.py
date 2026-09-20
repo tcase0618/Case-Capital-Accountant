@@ -110,6 +110,9 @@ class RawFact:
     context_ref: str
     filed_date: str  # When filing was accepted (YYYY-MM-DD)
     accepted_timestamp: str  # ISO timestamp
+    lineage_hash: str | None
+    lineage_version: int
+    first_reported_accession_number: str | None
 
 
 class PointInTimeResolver:
@@ -199,6 +202,9 @@ class PointInTimeResolver:
         as_of_date: str,  # YYYY-MM-DD
         taxonomy: str | None = None,
         concept: str | None = None,
+        *,
+        prefer: str = "latest_available",
+        collapse_lineage: bool = True,
     ) -> list[RawFact]:
         """
         Get raw XBRL facts available at a point in time.
@@ -265,6 +271,9 @@ class PointInTimeResolver:
 
         raw_facts_db = session.scalars(fact_stmt).all()
 
+        if collapse_lineage:
+            raw_facts_db = PointInTimeResolver._collapse_fact_versions(raw_facts_db, prefer=prefer)
+
         # Convert to RawFact dataclass
         facts = []
         for rf in raw_facts_db:
@@ -279,11 +288,38 @@ class PointInTimeResolver:
                 unit=rf.unit,
                 context_ref=rf.context_id or "",
                 filed_date=rf.filed_date.isoformat() if rf.filed_date else "",
-                accepted_timestamp=rf.ingested_at.isoformat(),
+                accepted_timestamp=(rf.accepted_at or rf.ingested_at).isoformat(),
+                lineage_hash=rf.lineage_hash,
+                lineage_version=rf.lineage_version,
+                first_reported_accession_number=rf.first_reported_accession_number,
             )
             facts.append(fact)
 
         return facts
+
+    @staticmethod
+    def _collapse_fact_versions(raw_facts_db: list, *, prefer: str) -> list:
+        if prefer not in {"latest_available", "first_reported"}:
+            raise ValueError(f"Unsupported preference: {prefer}")
+
+        grouped: dict[str, list] = {}
+        for rf in raw_facts_db:
+            lineage_key = rf.lineage_hash or str(rf.id)
+            grouped.setdefault(lineage_key, []).append(rf)
+
+        resolved: list = []
+        for versions in grouped.values():
+            ordered = sorted(
+                versions,
+                key=lambda rf: (
+                    rf.accepted_at or rf.ingested_at,
+                    rf.filed_date,
+                    rf.created_at,
+                    rf.lineage_version,
+                ),
+            )
+            resolved.append(ordered[-1] if prefer == "latest_available" else ordered[0])
+        return resolved
 
     @staticmethod
     def resolve_metric(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -93,8 +92,8 @@ class ResearchExporter:
         """
         try:
             import csv
-        except ImportError:
-            raise ImportError("csv module required for CSV export")
+        except ImportError as err:
+            raise ImportError("csv module required for CSV export") from err
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,8 +134,8 @@ class ResearchExporter:
         try:
             import pyarrow as pa
             import pyarrow.parquet as pq
-        except ImportError:
-            raise ImportError("pyarrow required for Parquet export")
+        except ImportError as err:
+            raise ImportError("pyarrow required for Parquet export") from err
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,8 +185,8 @@ class ResearchExporter:
         """
         try:
             import duckdb
-        except ImportError:
-            raise ImportError("duckdb required for DuckDB export")
+        except ImportError as err:
+            raise ImportError("duckdb required for DuckDB export") from err
 
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,11 +5,17 @@ from accountant.db.models import (
     Company,
     Filing,
     FilingDocument,
+    PaperBookPosition,
     RawFact,
     ReportCard,
     Security,
 )
-from accountant.db.session import create_db_engine, create_session_factory, session_scope, sqlite_write_guard
+from accountant.db.session import (
+    create_db_engine,
+    create_session_factory,
+    session_scope,
+    sqlite_write_guard,
+)
 
 __all__ = [
     "Base",
@@ -18,6 +24,7 @@ __all__ = [
     "Company",
     "Filing",
     "FilingDocument",
+    "PaperBookPosition",
     "RawFact",
     "ReportCard",
     "Security",

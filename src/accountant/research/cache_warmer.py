@@ -4,11 +4,12 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from sqlalchemy import func, select
+
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
 from accountant.db.models import Company, CompanyReport
 from accountant.logging import get_logger
 from accountant.research.buy_board import backfill_buy_board_candidates
-from sqlalchemy import func, select
 
 log = get_logger(__name__)
 

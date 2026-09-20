@@ -3,9 +3,11 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session
 
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
@@ -138,16 +140,32 @@ def _estimate_growth_forecast(report: CompanyReport) -> float:
     return round(max(4.0, min(35.0, forecast)), 2)
 
 
+@lru_cache(maxsize=8)
+def _raw_facts_has_accepted_at(bind_url: str) -> bool:
+    engine = create_db_engine(bind_url)
+    try:
+        columns = {column["name"] for column in sa_inspect(engine).get_columns("raw_facts")}
+        return "accepted_at" in columns
+    except Exception:
+        return False
+    finally:
+        engine.dispose()
+
+
 def _latest_fact_value(session: Session, company_id, concepts: list[str]) -> float | None:
-    fact = session.execute(
-        select(RawFact)
+    bind = session.get_bind()
+    order_by = [RawFact.period_end.desc(), RawFact.filed_date.desc().nullslast(), RawFact.created_at.desc()]
+    if _raw_facts_has_accepted_at(str(bind.url)):
+        order_by.insert(1, RawFact.accepted_at.desc().nullslast())
+    value = session.execute(
+        select(RawFact.value_numeric)
         .where(RawFact.company_id == company_id, RawFact.concept.in_(concepts), RawFact.value_numeric.is_not(None))
-        .order_by(RawFact.period_end.desc(), RawFact.filed_date.desc(), RawFact.created_at.desc())
+        .order_by(*order_by)
         .limit(1)
     ).scalar_one_or_none()
-    if fact is None or fact.value_numeric is None:
+    if value is None:
         return None
-    return float(fact.value_numeric)
+    return float(value)
 
 
 def _estimate_eps(session: Session, report: CompanyReport) -> float | None:

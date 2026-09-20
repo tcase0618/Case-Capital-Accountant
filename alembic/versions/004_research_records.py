@@ -1,18 +1,18 @@
+import sqlalchemy as sa
+from alembic import op
+
 """Create research_records table.
 
-Revision ID: 004
-Revises: 003_canonical_schema
+Revision ID: 006
+Revises: 005
 Create Date: 2026-08-12 00:00:00.000000
 
 """
 
-from alembic import op
-import sqlalchemy as sa
-
 
 # revision identifiers, used by Alembic.
-revision = "004"
-down_revision = "003_canonical_schema"
+revision = "006"
+down_revision = "005"
 branch_labels = None
 depends_on = None
 

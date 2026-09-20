@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -41,6 +42,7 @@ class RawFact(Base):
         UniqueConstraint("fact_hash", name="uq_raw_facts_fact_hash"),
         Index("ix_raw_facts_company_concept_period", "company_id", "concept", "period_end"),
         Index("ix_raw_facts_filing_concept", "filing_id", "concept"),
+        Index("ix_raw_facts_lineage_accepted", "company_id", "lineage_hash", "accepted_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(), primary_key=True, default=uuid.uuid4)
@@ -65,11 +67,18 @@ class RawFact(Base):
     source_document: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     accession_number: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     fiscal_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fiscal_period: Mapped[str | None] = mapped_column(String(16), nullable=True)
     frame: Mapped[str | None] = mapped_column(String(32), nullable=True)
     form: Mapped[str | None] = mapped_column(String(32), nullable=True)
     filed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    lineage_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    lineage_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    prior_version_fact_id: Mapped[uuid.UUID | None] = mapped_column(UUID(), nullable=True)
+    first_reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_reported_accession_number: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    is_amendment_fact: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     label: Mapped[str | None] = mapped_column(String(512), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="xbrl")
