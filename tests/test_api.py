@@ -672,6 +672,7 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     client = TestClient(app)
 
     response = client.get("/api/report-cards/AAPL")
+    ftm_response = client.get("/api/ftm/overview")
 
     app.dependency_overrides.clear()
 
@@ -687,6 +688,8 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert payload["final_verdict"]["data_completeness_pct"] == 81.2
     assert payload["final_verdict"]["next_expected_filing_date"] == "2026-11-01"
     assert payload["final_verdict"]["score_lineage"]["canonical_score_name"] == "positive_quality_score"
+    assert ftm_response.status_code == 200
+    assert ftm_response.json()["version"] == "FTM_MARKET_CAP_MAP_V1"
 
 
 def test_company_change_timeline_returns_filing_deltas_and_source_link(test_session) -> None:

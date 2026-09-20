@@ -36,6 +36,8 @@ from accountant.api.schemas import (
     FilingDocumentResponse,
     FilingFeedItemResponse,
     FilingResponse,
+    FTMOverviewResponse,
+    FTMSectorResponse,
     FutureCandidateResponse,
     HistoricalSnapshotResponse,
     IntegrationStatusResponse,
@@ -89,6 +91,7 @@ from accountant.research.buy_board import (
 )
 from accountant.research.cache_warmer import CACHE_WARMER
 from accountant.research.change_timeline import build_company_change_timeline
+from accountant.research.ftm import ftm_overview, ftm_sector
 from accountant.research.operating_mode import operating_mode_payload
 from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
@@ -1391,6 +1394,19 @@ def source_integrity(session: SessionDep) -> SourceIntegrityResponse:
 @app.get("/api/sectors", response_model=list[SectorSummaryResponse])
 def list_sectors(session: SessionDep) -> list[SectorSummaryResponse]:
     return [SectorSummaryResponse(**row) for row in list_sector_summaries(session)]
+
+
+@app.get("/api/ftm/overview", response_model=FTMOverviewResponse)
+def follow_the_money_overview(session: SessionDep) -> FTMOverviewResponse:
+    return FTMOverviewResponse(**ftm_overview(session))
+
+
+@app.get("/api/ftm/sectors/{sector_slug}", response_model=FTMSectorResponse)
+def follow_the_money_sector(sector_slug: str, session: SessionDep) -> FTMSectorResponse:
+    profile = ftm_sector(session, sector_slug)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="FTM sector not found")
+    return FTMSectorResponse(**profile)
 
 
 @app.get("/api/sectors/{sector_slug}", response_model=SectorProfileResponse)

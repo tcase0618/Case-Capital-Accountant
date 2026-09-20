@@ -75,6 +75,8 @@ export const api = {
   sourceIntegrity: () => request("/api/source-integrity"),
   operatingMode: () => request("/api/operating-mode"),
   sectors: () => request("/api/sectors"),
+  ftmOverview: () => request("/api/ftm/overview"),
+  ftmSector: (sectorSlug) => request(`/api/ftm/sectors/${encodeURIComponent(sectorSlug)}`),
   sectorProfile: (sectorSlug) => request(`/api/sectors/${encodeURIComponent(sectorSlug)}`),
   subSectorProfile: (sectorSlug, subSectorSlug) =>
     request(`/api/sectors/${encodeURIComponent(sectorSlug)}/subsectors/${encodeURIComponent(subSectorSlug)}`),

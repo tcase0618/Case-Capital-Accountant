@@ -335,6 +335,33 @@ class OperatingModeResponse(BaseModel):
     policy_version: str
 
 
+class FTMOverviewResponse(BaseModel):
+    version: str
+    generated_at: str
+    market_cap_basis: str
+    total_market_cap: float | None = None
+    covered_company_count: int
+    weighted_company_count: int
+    sectors: list[dict[str, object]]
+    capital_context: dict[str, object]
+    coverage_notes: list[str]
+
+
+class FTMSectorResponse(BaseModel):
+    version: str
+    generated_at: str
+    sector: str
+    sector_slug: str
+    description: str
+    market_cap: float | None = None
+    weight_pct: float | None = None
+    company_count: int
+    subsectors: list[dict[str, object]]
+    companies: list[dict[str, object]]
+    capital_context: dict[str, object]
+    coverage_notes: list[str]
+
+
 class AccountantIntegrationTickerResponse(BaseModel):
     generated_at: str
     ticker: str

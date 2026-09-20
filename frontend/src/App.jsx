@@ -70,6 +70,7 @@ const NAV = [
   { to: "/time-machine", label: "TIME MACHINE", short: "TM", icon: Clock3, group: "ANALYSIS", color: "#f97316", description: "Point-in-time statement and warning snapshots." },
   { to: "/reports", label: "REPORTS", short: "RP", icon: ScrollText, group: "ANALYSIS", color: "#fb7185", description: "Ranked cached report book and machine status." },
   { to: "/sectors", label: "SECTORS", short: "SC", icon: Radar, group: "ANALYSIS", color: "#38bdf8", description: "Sector profiles, bottlenecks, enablers, and laggers." },
+  { to: "/ftm", label: "FTM", short: "FM", icon: LineChart, group: "ANALYSIS", color: "#f59e0b", description: "Follow the money: market-cap-weighted sectors and subsectors." },
   { to: "/paper-book", label: "PAPER BOOK", short: "PB", icon: Archive, group: "ANALYSIS", color: "#a78bfa", description: "Frozen Lane 1 paper evidence and out-of-sample research tracking." },
   { to: "/buy-board", label: "BUY BOARD", short: "BB", icon: BarChart3, group: "ANALYSIS", color: "#4ade80", description: "Trade candidates, future upside, and profile cards." },
   { to: "/research", label: "RESEARCH", short: "RS", icon: BookOpen, group: "SYSTEM", color: "#e879f9", description: "Research records and statement snapshot history." }
@@ -100,6 +101,7 @@ function App() {
             <Route path="/sectors" element={<SectorsPage />} />
             <Route path="/sectors/:sectorSlug" element={<SectorProfilePage />} />
             <Route path="/sectors/:sectorSlug/subsectors/:subSectorSlug" element={<SubSectorProfilePage />} />
+            <Route path="/ftm" element={<FTMPage />} />
             <Route path="/paper-book" element={<PaperBookPage />} />
             <Route path="/buy-board" element={<BuyBoardPage />} />
             <Route path="/buy-board/:ticker" element={<BuyBoardTickerProfilePage />} />
@@ -2621,6 +2623,130 @@ function SectorsPage() {
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+function FTMPage() {
+  const [overview, setOverview] = useState(null);
+  const [sector, setSector] = useState(null);
+  const [selectedSlug, setSelectedSlug] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.ftmOverview().then(setOverview).catch((nextError) => setError(nextError.message));
+  }, []);
+
+  const openSector = async (slug) => {
+    setSelectedSlug(slug);
+    try {
+      setSector(await api.ftmSector(slug));
+    } catch (nextError) {
+      setError(nextError.message);
+    }
+  };
+
+  if (error) {
+    return <Banner kind="error" text={error} />;
+  }
+  if (!overview) {
+    return <Card title="FTM // FOLLOW THE MONEY"><Empty text="LOADING MARKET-CAP MAP..." /></Card>;
+  }
+
+  const sectorItems = overview.sectors || [];
+  const activeSector = sector || null;
+  const chartItems = activeSector ? activeSector.subsectors || [] : sectorItems;
+  return (
+    <div style={{ display: "grid", gap: 18 }}>
+      <Card title="FTM // FOLLOW THE MONEY" accentColor="#f59e0b">
+        <PageSectionHeader
+          title={activeSector ? `${activeSector.sector.toUpperCase()} // CAPITAL MAP` : "PUBLIC MARKET CAPITAL MAP"}
+          description={activeSector ? activeSector.description : "Market-cap-weighted view of the public-market sectors represented in the Accountant's stored research universe."}
+          chips={[
+            { label: "BASIS", value: "MARKET CAP", color: "#f59e0b" },
+            { label: "COMPANIES", value: formatCompactNumber(activeSector?.company_count || overview.covered_company_count), color: "#60a5fa" },
+            { label: "WEIGHTED", value: formatCompactNumber(activeSector ? activeSector.company_count : overview.weighted_company_count), color: "#4ade80" }
+          ]}
+          actions={activeSector ? <button type="button" className="chip-button" onClick={() => { setSector(null); setSelectedSlug(""); }}>ALL SECTORS</button> : null}
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(240px, 0.75fr) minmax(300px, 1.25fr)", gap: 22, alignItems: "center" }}>
+          <FTMPie items={chartItems} selectedSlug={selectedSlug} onSelect={activeSector ? undefined : openSector} />
+          <div style={{ display: "grid", gap: 7 }}>
+            {chartItems.map((item, index) => {
+              const label = item.name;
+              const clickable = !activeSector;
+              return (
+                <button
+                  key={item.slug || label}
+                  type="button"
+                  onClick={() => clickable && openSector(item.slug)}
+                  style={{ display: "grid", gridTemplateColumns: "10px 1fr auto auto", gap: 9, alignItems: "center", background: "transparent", border: 0, borderBottom: hairline, padding: "9px 0", textAlign: "left", cursor: clickable ? "pointer" : "default", color: labelLight }}
+                >
+                  <span style={{ width: 8, height: 8, background: FTM_COLORS[index % FTM_COLORS.length] }} />
+                  <span style={{ fontSize: 11, color: clickable && selectedSlug === item.slug ? "#f59e0b" : labelLight }}>{label}</span>
+                  <span style={{ fontSize: 10, color: "#f59e0b" }}>{formatMetricPct(item.weight_pct)}</span>
+                  <span style={{ fontSize: 10, color: muted }}>{formatCompactNumber(item.market_cap, { currency: true })}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </Card>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 18 }}>
+        <Card title="CAPITAL CONTEXT" accentColor="#5eead4">
+          <CapitalContext context={activeSector?.capital_context || overview.capital_context} />
+        </Card>
+        <Card title="DATA COVERAGE" accentColor="#60a5fa">
+          {(activeSector?.coverage_notes || overview.coverage_notes || []).map((note) => <div key={note} style={{ color: muted, fontSize: 10, lineHeight: 1.55, borderBottom: hairline, padding: "8px 0" }}>// {note}</div>)}
+        </Card>
+      </div>
+
+      {activeSector ? (
+        <Card title={`${activeSector.sector.toUpperCase()} // COMPANY MAP`} accentColor="#4ade80">
+          <div style={{ display: "grid", gap: 5 }}>
+            {(activeSector.companies || []).map((company) => (
+              <div key={company.ticker} style={{ display: "grid", gridTemplateColumns: "80px minmax(120px, 1fr) 90px 80px 70px", gap: 10, alignItems: "center", padding: "9px 0", borderBottom: hairline }}>
+                <span style={{ color: "#f59e0b", fontWeight: 800, fontSize: 11 }}>{company.ticker}</span>
+                <span style={{ color: labelLight, fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{company.company_name}</span>
+                <span style={{ color: "#f59e0b", fontSize: 10, textAlign: "right" }}>{formatMetricPct(company.weight_pct)}</span>
+                <span style={{ color: "#60a5fa", fontSize: 10, textAlign: "right" }}>{formatMetricNum(company.score)}</span>
+                <span style={{ color: company.action === "BUY" ? "#4ade80" : muted, fontSize: 9, textAlign: "right" }}>{company.action || "N/A"}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
+    </div>
+  );
+}
+
+const FTM_COLORS = ["#f59e0b", "#60a5fa", "#5eead4", "#4ade80", "#a78bfa", "#fb7185", "#f97316", "#38bdf8", "#e879f9", "#facc15"];
+
+function FTMPie({ items, onSelect }) {
+  let cursor = 0;
+  const segments = items.map((item, index) => {
+    const start = cursor;
+    cursor += Number(item.weight_pct || 0);
+    return `${FTM_COLORS[index % FTM_COLORS.length]} ${start}% ${cursor}%`;
+  });
+  return (
+    <div style={{ display: "grid", placeItems: "center", gap: 10 }}>
+      <button type="button" onClick={() => undefined} style={{ width: 210, height: 210, borderRadius: "50%", border: "1px solid rgba(245,158,11,0.35)", background: segments.length ? `conic-gradient(${segments.join(", ")})` : "rgba(255,255,255,0.05)", boxShadow: "0 0 30px rgba(245,158,11,0.12)", cursor: onSelect ? "pointer" : "default" }} aria-label="Market capitalization pie chart" />
+      <div style={{ color: muted, fontSize: 9, letterSpacing: "0.14em" }}>CLICK A LEGEND ROW TO DRILL DOWN</div>
+    </div>
+  );
+}
+
+function CapitalContext({ context }) {
+  const government = context?.government_money || {};
+  const executive = context?.executive_money || {};
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <BoardLine k="GOVERNMENT MONEY" v={government.status === "not_ingested" ? "NOT INGESTED" : formatMoney(government.value)} />
+      <BoardLine k="CEO / EXEC MONEY" v={executive.status === "not_ingested" ? "NOT INGESTED" : formatMoney(executive.value)} />
+      <BoardLine k="MARKET CAP WEIGHT" v={context?.market_cap_weighting?.status === "active" ? "ACTIVE" : "PENDING"} />
+      <div style={{ color: muted, fontSize: 10, lineHeight: 1.5 }}>Government funding requires award/procurement/grant data. Executive capital requires DEF 14A compensation and Form 4 normalization; neither is inferred from market cap.</div>
     </div>
   );
 }
