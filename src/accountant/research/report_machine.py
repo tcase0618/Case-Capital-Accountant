@@ -71,6 +71,14 @@ _NON_OPERATING_NAME_MARKERS = (
     "spac",
 )
 
+# Full report-card scoring belongs to financial statements and explicitly
+# material SEC events. Ownership forms remain available as source evidence but
+# must not replace a company's latest accounting report.
+_REPORT_CARD_FILING_TYPES = {
+    "10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A", "6-K",
+    "8-K", "8-K/A", "NT 10-K", "NT 10-Q", "UPLOAD", "CORRESP",
+}
+
 _BASE_WORKER_ROLES: list[dict[str, Any]] = [
     {
         "role": "sec-filings-a",
@@ -1094,7 +1102,7 @@ class ContinuousResearchMachine:
         filings_count = len(filings)
         raw_facts_count = len(facts)
         canonical_count = _count(session, CanonicalFact, company.id)
-        latest_filing_row = filings[0] if filings else None
+        latest_filing_row = _latest_report_card_filing(filings)
         latest_filing = latest_filing_row.filing_date if latest_filing_row else None
         years_of_history = len({fact.period_end.year for fact in facts if fact.period_end is not None})
         gics_sector = _sector_name(company.sic_description)
@@ -1103,8 +1111,10 @@ class ContinuousResearchMachine:
         prior_same_form_filing = next(
             (
                 filing
-                for filing in filings[1:]
-                if latest_filing_row is not None and filing.form_type == latest_filing_row.form_type
+                for filing in filings
+                if latest_filing_row is not None
+                and filing.id != latest_filing_row.id
+                and filing.form_type == latest_filing_row.form_type
             ),
             None,
         )
@@ -1114,7 +1124,11 @@ class ContinuousResearchMachine:
             sec_user_agent=get_settings().sec_user_agent,
         )
         prior_same_form_filings = [
-            filing for filing in filings[1:] if latest_filing_row is not None and filing.form_type == latest_filing_row.form_type
+            filing
+            for filing in filings
+            if latest_filing_row is not None
+            and filing.id != latest_filing_row.id
+            and filing.form_type == latest_filing_row.form_type
         ]
         event_signal_bundle = build_event_red_flags(
             filings,
@@ -1907,6 +1921,14 @@ def _latest_company_report(session: Session, company_id: Any) -> CompanyReport |
         .order_by(CompanyReport.updated_at.desc(), CompanyReport.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
+
+
+def _latest_report_card_filing(filings: list[Filing]) -> Filing | None:
+    """Select the newest filing allowed to anchor an accounting report card."""
+    return next(
+        (filing for filing in filings if (filing.form_type or "").upper() in _REPORT_CARD_FILING_TYPES),
+        None,
+    )
 
 
 def _series(

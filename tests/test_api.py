@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,7 @@ from accountant.db.models import (
     Security,
 )
 from accountant.ingest.companies import BulkCompanyImportResult
+from accountant.research.report_machine import _latest_report_card_filing
 
 
 def _session_override(test_session):
@@ -26,6 +28,20 @@ def _session_override(test_session):
         yield test_session
 
     return _override
+
+
+def test_report_card_anchor_ignores_ownership_forms() -> None:
+    latest = _latest_report_card_filing(
+        [
+            SimpleNamespace(form_type="4"),
+            SimpleNamespace(form_type="4/A"),
+            SimpleNamespace(form_type="8-K"),
+            SimpleNamespace(form_type="10-Q"),
+        ]
+    )
+
+    assert latest is not None
+    assert latest.form_type == "8-K"
 
 
 def _seed_company_with_filings_and_facts(test_session) -> Company:
