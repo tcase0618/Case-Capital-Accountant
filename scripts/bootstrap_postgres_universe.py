@@ -30,13 +30,14 @@ def main() -> None:
         ensure_canonical_taxonomy_seeded(session)
         session.commit()
 
-        universe = load_universe_tickers(["sp500", "russell2000", "nasdaq"])
+        universe = load_universe_tickers(["sp500", "russell2000", "nasdaq", "nysearca"])
         tickers = _merge_universe_groups(universe.values())
         print(
             "loaded universe "
             f"sp500={len(universe.get('sp500', []))} "
             f"russell2000={len(universe.get('russell2000', []))} "
             f"nasdaq={len(universe.get('nasdaq', []))} "
+            f"nysearca={len(universe.get('nysearca', []))} "
             f"unique={len(tickers)}",
             flush=True,
         )

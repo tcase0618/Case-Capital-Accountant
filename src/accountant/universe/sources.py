@@ -13,6 +13,7 @@ from accountant.domain.ticker import normalize_ticker
 
 _SP500_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 _NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
+_NASDAQ_TRADED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqtraded.txt"
 _RUSSELL_2000_URL = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/latest-holdings.csv"
 
 
@@ -129,6 +130,31 @@ def load_nasdaq_tickers() -> list[str]:
     return _normalize_many(tickers)
 
 
+def load_nyse_arca_tickers() -> list[str]:
+    """Load all current NYSE Arca non-ETF listings for universe coverage.
+
+    The directory includes instruments that are not operating companies (for
+    example ETNs and partnership units). Keep them in the tracked symbol
+    universe, but let SEC resolution and downstream eligibility flags prevent
+    them from receiving ordinary-company reports.
+    """
+    with _client() as client:
+        response = client.get(_NASDAQ_TRADED_URL)
+        response.raise_for_status()
+    reader = csv.DictReader(io.StringIO(response.text), delimiter="|")
+    tickers: list[str] = []
+    for row in reader:
+        symbol = (row.get("Symbol") or "").strip()
+        if not symbol or symbol == "File Creation Time":
+            continue
+        if (row.get("Listing Exchange") or "").strip().upper() != "P":
+            continue
+        if (row.get("ETF") or "").strip().upper() == "Y":
+            continue
+        tickers.append(symbol)
+    return _normalize_many(tickers)
+
+
 def load_russell2000_tickers() -> list[str]:
     with _client() as client:
         response = client.get(_RUSSELL_2000_URL)
@@ -162,6 +188,8 @@ def load_universe_tickers(universe_names: list[str]) -> dict[str, list[str]]:
             results[key] = load_sp500_tickers()
         elif key == "nasdaq":
             results[key] = load_nasdaq_tickers()
+        elif key in {"nysearca", "nyse_arca", "arca"}:
+            results[key] = load_nyse_arca_tickers()
         elif key == "russell2000":
             results[key] = load_russell2000_tickers()
         else:

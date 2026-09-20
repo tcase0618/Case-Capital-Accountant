@@ -16,11 +16,12 @@ class UniverseMembership:
 
 @lru_cache(maxsize=1)
 def load_membership_maps() -> dict[str, set[str]]:
-    loaded = load_universe_tickers(["sp500", "russell2000", "nasdaq"])
+    loaded = load_universe_tickers(["sp500", "russell2000", "nasdaq", "nysearca"])
     return {
         "sp500": set(loaded.get("sp500", [])),
         "russell2000": set(loaded.get("russell2000", [])),
         "nasdaq": set(loaded.get("nasdaq", [])),
+        "nysearca": set(loaded.get("nysearca", [])),
     }
 
 
@@ -40,5 +41,5 @@ def any_membership(symbols: Iterable[str]) -> set[str]:
     return {
         symbol
         for symbol in values
-        if symbol in maps["sp500"] or symbol in maps["russell2000"] or symbol in maps["nasdaq"]
+        if symbol in maps["sp500"] or symbol in maps["russell2000"] or symbol in maps["nasdaq"] or symbol in maps["nysearca"]
     }

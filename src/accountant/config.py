@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     ibkr_account_id: str | None = Field(default=None)
     machine_enabled: bool = Field(default=True)
     machine_interval_seconds: int = Field(default=15)
-    machine_universes: str = Field(default="sp500,nasdaq,russell2000")
+    machine_universes: str = Field(default="sp500,nasdaq,russell2000,nysearca")
     machine_batch_size: int = Field(default=10)
     machine_workers: int = Field(default=8)
 
