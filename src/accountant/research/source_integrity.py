@@ -6,7 +6,6 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-
 SOURCE_INTEGRITY_VERSION = "SOURCE_INTEGRITY_V1"
 
 

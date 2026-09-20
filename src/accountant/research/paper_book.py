@@ -146,7 +146,7 @@ def _catastrophic_veto(row: ReportCard) -> bool:
     if str(event_flags.get("restatement_severity") or "").lower() == "big-r":
         return True
     veto_reason = str(verdict.get("veto_reason") or "").lower()
-    if any(
+    return any(
         phrase in veto_reason
         for phrase in (
             "going concern",
@@ -154,9 +154,7 @@ def _catastrophic_veto(row: ReportCard) -> bool:
             "sustained beneish",
             "unscheduled auditor change",
         )
-    ):
-        return True
-    return False
+    )
 
 
 def _research_lane(verdict: dict[str, object]) -> str:

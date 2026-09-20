@@ -13,7 +13,6 @@ from accountant.db.models import Company, CompanyBottleneckSnapshot, CompanyRepo
 from accountant.ingest.filing_text_parser import FilingTextParser, TextSourceType
 from accountant.research.company_router import CompanyRoute, route_company
 
-
 BOTTLENECK_ENGINE_VERSION = "BOTTLENECK_ENGINE_V1"
 
 AI_SIC_KEYWORDS = (

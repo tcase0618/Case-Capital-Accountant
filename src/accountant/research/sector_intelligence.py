@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 
 from accountant.db.models import Company, CompanyBottleneckSnapshot, CompanyReport
 
-
 SECTOR_INTELLIGENCE_VERSION = "SECTOR_INTELLIGENCE_V1"
 
 STRATEGIC_BOTTLENECKS: tuple[dict[str, Any], ...] = (

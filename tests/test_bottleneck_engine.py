@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from accountant.db.models import Company, CompanyReport
-from accountant.research.bottleneck_engine import build_bottleneck_payload, extract_management_bottlenecks
+from accountant.research.bottleneck_engine import (
+    build_bottleneck_payload,
+    extract_management_bottlenecks,
+)
 
 
 def test_extract_management_bottlenecks_tags_ai_and_energy_language() -> None:
