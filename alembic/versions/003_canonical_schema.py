@@ -23,8 +23,8 @@ def upgrade() -> None:
         sa.Column("unit_hint", sa.String(32), nullable=True),
         sa.Column("is_active", sa.Boolean(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("code", name="uq_canonical_concepts_code"),
     )
@@ -43,8 +43,8 @@ def upgrade() -> None:
         sa.Column("rationale", sa.Text(), nullable=True),
         sa.Column("mapping_version", sa.Integer(), nullable=False),
         sa.Column("is_active", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(
             ["canonical_concept_id"],
             ["canonical_concepts.id"],
@@ -74,7 +74,7 @@ def upgrade() -> None:
         sa.Column("mapping_confidence", sa.String(32), nullable=False),
         sa.Column("reported_or_derived", sa.String(32), nullable=False),
         sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.ForeignKeyConstraint(
             ["company_id"],
             ["companies.id"],
