@@ -37,7 +37,11 @@ from accountant.ingest.filings import (
 from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
 from accountant.research.bottleneck_engine import upsert_company_bottleneck_snapshot
-from accountant.research.buy_board import _estimate_share_count, sync_buy_board_candidate
+from accountant.research.buy_board import (
+    _estimate_cc_valuation,
+    _estimate_share_count,
+    sync_buy_board_candidate,
+)
 from accountant.research.classification_engine import FundamentalResearchClassificationEngine
 from accountant.research.company_router import route_company
 from accountant.research.data_quality_engine import ResearchDataQualityEngine
@@ -1852,6 +1856,16 @@ class ContinuousResearchMachine:
                     "recency_factor": 1.0,
                 },
             },
+        }
+        # Persist the exact research valuation alongside this immutable filing card.
+        # Historical cards created before this version intentionally remain unfilled.
+        cc_valuation = _estimate_cc_valuation(session, report)
+        final_verdict["valuation_snapshot"] = {
+            "model_version": "CC_EARNINGS_POWER_V1",
+            "cc_valuation": _maybe_round(cc_valuation),
+            "market_price": _maybe_round(_safe_float(market_data_linkage.get("price_asof"))),
+            "captured_at": datetime.now(UTC).isoformat(),
+            "status": "captured" if cc_valuation is not None else "unavailable_missing_earnings_or_share_data",
         }
         session.flush()
         persist_report_card(

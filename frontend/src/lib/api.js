@@ -54,6 +54,7 @@ export const api = {
   statements: (ticker, statementType = "") =>
     request(`/api/companies/${ticker}/statements${statementType ? `?statement_type=${encodeURIComponent(statementType)}` : ""}`),
   research: (ticker) => request(`/api/companies/${ticker}/research-records`),
+  companyTimeline: (ticker, limit = 80) => request(`/api/companies/${ticker}/change-timeline?limit=${limit}`),
   timeMachine: (ticker, asOfDate) =>
     request(`/api/companies/${ticker}/time-machine?as_of_date=${encodeURIComponent(asOfDate)}`),
   taxonomy: (category = "") =>

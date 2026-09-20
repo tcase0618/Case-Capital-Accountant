@@ -661,6 +661,82 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert payload["final_verdict"]["score_lineage"]["canonical_score_name"] == "positive_quality_score"
 
 
+def test_company_change_timeline_returns_filing_deltas_and_source_link(test_session) -> None:
+    company = _seed_company_with_filings_and_facts(test_session)
+    base = {
+        "company_id": company.id,
+        "cik": company.cik,
+        "ticker": "AAPL",
+        "company_name": company.name,
+        "standardized_financials": {"lt_debt": 100.0},
+        "growth_trend_deltas": {"revenue_yoy_growth": 8.0, "gross_margin": 40.0},
+        "accrual_cash_quality": {"cash_conversion_ratio": 1.1, "fcf_ni_ratio": 0.9},
+        "forensic_scores": {},
+        "positive_quality": {},
+        "event_red_flags": {"going_concern_flag": False},
+        "textual_signals": {},
+        "non_gaap_forensics": {},
+        "governance_ownership": {},
+        "universe_tradability": {},
+        "is_restatement": False,
+        "tag_map_version": "CANONICAL_MAPPING_V1",
+    }
+    first = ReportCard(
+        id=uuid.uuid4(),
+        report_card_id="0000320193_10-Q_2025-03-29_2025-05-01",
+        filing_type="10-Q",
+        period_of_report=date(2025, 3, 29),
+        filed_date=date(2025, 5, 1),
+        accepted_at=datetime(2025, 5, 1, 16, 0, 0),
+        accession_number="0000320193-25-000101",
+        source_url="https://www.sec.gov/Archives/aapl-first",
+        market_data_linkage={"price_asof": 180.0},
+        final_verdict={
+            "grade": "B", "grade_score": 78.0, "current_action": "WATCH",
+            "valuation_snapshot": {"cc_valuation": 200.0, "market_price": 180.0},
+        },
+        **base,
+    )
+    second = ReportCard(
+        id=uuid.uuid4(),
+        report_card_id="0000320193_10-Q_2025-06-28_2025-08-01",
+        filing_type="10-Q",
+        period_of_report=date(2025, 6, 28),
+        filed_date=date(2025, 8, 1),
+        accepted_at=datetime(2025, 8, 1, 16, 0, 0),
+        accession_number="0000320193-25-000102",
+        source_url="https://www.sec.gov/Archives/aapl-second",
+        prior_report_card_id=first.report_card_id,
+        market_data_linkage={"price_asof": 195.0},
+        growth_trend_deltas={"revenue_yoy_growth": 13.0, "gross_margin": 43.0},
+        event_red_flags={"going_concern_flag": False, "sec_comment_letter_flag": True},
+        final_verdict={
+            "grade": "A", "grade_score": 86.5, "current_action": "BUY",
+            "valuation_snapshot": {"cc_valuation": 230.0, "market_price": 195.0},
+        },
+        **{key: value for key, value in base.items() if key not in {"growth_trend_deltas", "event_red_flags"}},
+    )
+    test_session.add_all([first, second])
+    test_session.commit()
+
+    app.dependency_overrides[get_session] = _session_override(test_session)
+    client = TestClient(app)
+    response = client.get("/api/companies/AAPL/change-timeline")
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["model_version"] == "REPORT_CHANGE_TIMELINE_V1"
+    assert len(payload["events"]) == 2
+    latest = payload["events"][0]
+    assert latest["old_score"] == 78.0
+    assert latest["new_score"] == 86.5
+    assert latest["old_valuation"] == 200.0
+    assert latest["new_valuation"] == 230.0
+    assert latest["source_url"] == "https://www.sec.gov/Archives/aapl-second"
+    assert any("Action changed" in reason for reason in latest["reasons"])
+
+
 def test_paper_book_launch_and_list_endpoints(test_session) -> None:
     company = _seed_company_with_filings_and_facts(test_session)
     report_card = ReportCard(

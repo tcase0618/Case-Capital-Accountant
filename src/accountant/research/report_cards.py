@@ -43,12 +43,29 @@ def persist_report_card(
         filing_type=latest_filing.form_type,
         period_of_report=period_of_report,
         filed_date=latest_filing.filing_date,
+        accession_number=latest_filing.accession_number,
     )
     existing = session.execute(
         select(ReportCard).where(ReportCard.report_card_id == report_card_id)
     ).scalar_one_or_none()
     if existing is not None:
         return existing
+    # Cards created before accession-aware ids used a date-level key. Keep those
+    # rows stable while allowing distinct same-day filings from now on.
+    legacy_report_card_id = _build_report_card_id(
+        cik=company.cik,
+        filing_type=latest_filing.form_type,
+        period_of_report=period_of_report,
+        filed_date=latest_filing.filing_date,
+    )
+    legacy = session.execute(
+        select(ReportCard).where(
+            ReportCard.report_card_id == legacy_report_card_id,
+            ReportCard.accession_number == latest_filing.accession_number,
+        )
+    ).scalar_one_or_none()
+    if legacy is not None:
+        return legacy
 
     prior = session.execute(
         select(ReportCard)
@@ -144,10 +161,20 @@ def latest_report_card_for_ticker(session: Session, ticker: str) -> ReportCard |
     return rows[0] if rows else None
 
 
-def _build_report_card_id(*, cik: str, filing_type: str, period_of_report: date | None, filed_date: date) -> str:
+def _build_report_card_id(
+    *,
+    cik: str,
+    filing_type: str,
+    period_of_report: date | None,
+    filed_date: date,
+    accession_number: str | None = None,
+) -> str:
     period_token = period_of_report.isoformat() if period_of_report else "unknown-period"
     filing_token = filing_type.replace("/", "-")
-    return f"{cik}_{filing_token}_{period_token}_{filed_date.isoformat()}"
+    base = f"{cik}_{filing_token}_{period_token}_{filed_date.isoformat()}"
+    if accession_number:
+        return f"{base}_{accession_number.replace('-', '')}"
+    return base
 
 
 def _pointer_hash(accession_number: str, source_url: str | None) -> str:

@@ -482,6 +482,41 @@ class ReportCardResponse(BaseModel):
     created_at: str | None = None
 
 
+class CompanyChangeTimelineEventResponse(BaseModel):
+    event_id: str
+    occurred_at: str
+    filing_type: str
+    filing_date: str
+    accepted_at: str | None = None
+    accession_number: str
+    source_url: str | None = None
+    event_kind: str
+    title: str
+    summary: str
+    old_valuation: float | None = None
+    new_valuation: float | None = None
+    valuation_change_pct: float | None = None
+    old_price: float | None = None
+    new_price: float | None = None
+    price_change_pct: float | None = None
+    old_score: float | None = None
+    new_score: float | None = None
+    old_action: str | None = None
+    new_action: str | None = None
+    old_grade: str | None = None
+    new_grade: str | None = None
+    valuation_status: str
+    reasons: list[str]
+
+
+class CompanyChangeTimelineResponse(BaseModel):
+    ticker: str
+    company_name: str
+    generated_at: str
+    model_version: str
+    events: list[CompanyChangeTimelineEventResponse]
+
+
 class PaperBookPositionResponse(BaseModel):
     id: UUID
     book_name: str

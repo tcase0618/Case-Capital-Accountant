@@ -3587,12 +3587,19 @@ function BuyBoardTickerProfilePage() {
   const { setShellError } = useTerminal();
   const [board, setBoard] = useState([]);
   const [futureBoard, setFutureBoard] = useState([]);
+  const [timeline, setTimeline] = useState(null);
 
   const load = useCallback(async () => {
     try {
       const [boardData, futureData] = await Promise.all([api.buyBoard(), api.futureBoard()]);
       setBoard(boardData);
       setFutureBoard(futureData);
+      try {
+        setTimeline(await api.companyTimeline(ticker));
+      } catch (timelineError) {
+        // A ticker can predate report-card history or be a board-only legacy candidate.
+        setTimeline(null);
+      }
     } catch (error) {
       setShellError(error.message);
     }
@@ -3602,8 +3609,9 @@ function BuyBoardTickerProfilePage() {
     load();
   }, [load]);
 
-  const candidate = [...board, ...futureBoard].find((item) => item.ticker === ticker);
-  const futureMode = futureBoard.some((item) => item.ticker === ticker);
+  const normalizedTicker = (ticker || "").toUpperCase();
+  const candidate = [...board, ...futureBoard].find((item) => item.ticker === normalizedTicker);
+  const futureMode = futureBoard.some((item) => item.ticker === normalizedTicker);
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -3616,13 +3624,18 @@ function BuyBoardTickerProfilePage() {
             BACK TO BOARD
           </Link>
         </div>
-        {!candidate ? <Empty text="TICKER PROFILE NOT FOUND IN THE ACTIVE BUY BOARD OR FUTURE BOARD." /> : <BuyBoardProfileDetail candidate={candidate} futureMode={futureMode} />}
+        {!candidate ? (
+          <div style={{ display: "grid", gap: 14 }}>
+            <Empty text="TICKER PROFILE IS NOT IN THE ACTIVE BUY OR FUTURE BOARD." />
+            {timeline ? <CompanyChangeTimeline timeline={timeline} /> : null}
+          </div>
+        ) : <BuyBoardProfileDetail candidate={candidate} futureMode={futureMode} timeline={timeline} />}
       </Card>
     </div>
   );
 }
 
-function BuyBoardProfileDetail({ candidate, futureMode = false }) {
+function BuyBoardProfileDetail({ candidate, futureMode = false, timeline = null }) {
   const card = candidate.battle_card || {};
   const basis = candidate.accounting_basis || {};
   const scenario = card.scenario_matrix || {};
@@ -3653,7 +3666,8 @@ function BuyBoardProfileDetail({ candidate, futureMode = false }) {
           { id: "thesis", label: "THESIS" },
           { id: "basis", label: "ACCOUNTING BASIS" },
           { id: "forecast", label: "FORECAST STACK" },
-          { id: "risk", label: "RISKS" }
+          { id: "risk", label: "RISKS" },
+          { id: "timeline", label: "CHANGE TIMELINE" }
         ].map((item) => (
           <button
             key={item.id}
@@ -3797,6 +3811,58 @@ function BuyBoardProfileDetail({ candidate, futureMode = false }) {
           </div>
         </div>
       ) : null}
+
+      {tab === "timeline" ? <CompanyChangeTimeline timeline={timeline} /> : null}
+    </div>
+  );
+}
+
+function CompanyChangeTimeline({ timeline }) {
+  const events = timeline?.events || [];
+  if (!timeline) {
+    return <Empty text="REPORT-CARD CHANGE HISTORY IS NOT AVAILABLE YET." />;
+  }
+  return (
+    <div style={{ display: "grid", gap: 10, marginTop: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", borderBottom: hairline, paddingBottom: 10 }}>
+        <div>
+          <div style={{ color: labelLight, fontSize: 11, letterSpacing: "0.14em", fontWeight: 700 }}>// ACCOUNTANT CHANGE CALENDAR</div>
+          <div style={{ color: muted, fontSize: 10, marginTop: 5, lineHeight: 1.45 }}>
+            Immutable SEC filing snapshots. Values marked legacy were not captured before timeline v1 and are never reconstructed from current data.
+          </div>
+        </div>
+        <TopTag label="EVENTS" value={String(events.length)} color="#60a5fa" />
+      </div>
+      {events.length === 0 ? <Empty text="NO MATERIAL REPORT-CARD CHANGES RECORDED." /> : events.map((event) => {
+        const hasCapturedValuation = event.valuation_status === "captured";
+        const eventColor = event.event_kind === "MATERIAL_EVENT" ? "#fb7185" : event.event_kind === "RESEARCH_REVALUATION" ? "#5eead4" : "#60a5fa";
+        return (
+          <div key={event.event_id} style={{ border: hairline, borderLeft: `2px solid ${eventColor}`, padding: "12px 14px", background: "rgba(255,255,255,0.018)", display: "grid", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <div>
+                <div style={{ color: eventColor, fontSize: 10, letterSpacing: "0.14em", fontWeight: 800 }}>{event.title}</div>
+                <div style={{ color: muted, fontSize: 10, marginTop: 5 }}>{formatTimestampCompact(event.occurred_at)} // {event.filing_type} // {event.event_kind.replaceAll("_", " ")}</div>
+              </div>
+              {event.source_url ? <a href={event.source_url} target="_blank" rel="noreferrer" style={{ color: accent, fontSize: 10, letterSpacing: "0.1em", textDecoration: "none" }}>OPEN SEC SOURCE</a> : null}
+            </div>
+            <div style={{ color: labelLight, fontSize: 11, lineHeight: 1.55 }}>{event.summary}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(122px, 1fr))", gap: 8 }}>
+              <MiniMetric k="PRIOR SCORE" v={formatMetricNum(event.old_score)} color={labelLight} />
+              <MiniMetric k="UPDATED SCORE" v={formatMetricNum(event.new_score)} color="#5eead4" />
+              <MiniMetric k="PRIOR CC VAL" v={hasCapturedValuation ? formatMoney(event.old_valuation) : "LEGACY N/A"} color={labelLight} />
+              <MiniMetric k="UPDATED CC VAL" v={hasCapturedValuation ? formatMoney(event.new_valuation) : "NOT CAPTURED"} color="#4ade80" />
+              <MiniMetric k="VAL CHANGE" v={hasCapturedValuation ? formatPctSigned(event.valuation_change_pct) : "N/A"} color="#f59e0b" />
+              <MiniMetric k="PRICE AT UPDATE" v={formatMoney(event.new_price)} color="#60a5fa" />
+              <MiniMetric k="ACTION" v={`${event.old_action || "-"} -> ${event.new_action || "-"}`} color={eventColor} />
+            </div>
+            <div style={{ display: "grid", gap: 5 }}>
+              {(event.reasons || []).slice(0, 6).map((reason) => (
+                <div key={reason} style={{ color: muted, fontSize: 10, lineHeight: 1.45 }}>// {reason}</div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

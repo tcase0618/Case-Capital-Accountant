@@ -22,11 +22,12 @@ from accountant.api.schemas import (
     ActionResultResponse,
     AvailableStatementResponse,
     BottleneckSummaryResponse,
-    CompanyBottleneckSnapshotResponse,
     BuyBoardCandidateResponse,
     BuyBoardStatusResponse,
     CacheWarmStatusResponse,
     CanonicalFactResponse,
+    CompanyBottleneckSnapshotResponse,
+    CompanyChangeTimelineResponse,
     CompanyListItemResponse,
     CompanyReportResponse,
     CompanyResponse,
@@ -77,6 +78,7 @@ from accountant.ingest.companyfacts import ingest_company_facts_for_company
 from accountant.ingest.filings import ingest_company_filings
 from accountant.market.alpaca_research import quote as alpaca_quote
 from accountant.market.alpaca_research import status as alpaca_status
+from accountant.research.bottleneck_engine import bottleneck_summary_from_cache
 from accountant.research.buy_board import (
     BUY_BOARD,
     _best_price,
@@ -84,13 +86,17 @@ from accountant.research.buy_board import (
     _upside_pct,
     future_upside_candidates,
 )
-from accountant.research.bottleneck_engine import bottleneck_summary_from_cache
 from accountant.research.cache_warmer import CACHE_WARMER
+from accountant.research.change_timeline import build_company_change_timeline
 from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
 from accountant.research.report_machine import MACHINE
+from accountant.research.sector_intelligence import (
+    list_sector_summaries,
+    sector_profile,
+    sub_sector_profile,
+)
 from accountant.research.source_integrity import build_source_integrity_snapshot
-from accountant.research.sector_intelligence import list_sector_summaries, sector_profile, sub_sector_profile
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
 from accountant.sec.exceptions import SecConfigError
@@ -1497,6 +1503,23 @@ def get_latest_report_card(session: SessionDep, ticker: str) -> ReportCardRespon
     if row is None:
         raise HTTPException(status_code=404, detail="Report card not found")
     return _report_card_response(row)
+
+
+@app.get("/api/companies/{ticker}/change-timeline", response_model=CompanyChangeTimelineResponse)
+def get_company_change_timeline(
+    session: SessionDep,
+    ticker: str,
+    limit: int = Query(default=80, ge=1, le=200),
+) -> CompanyChangeTimelineResponse:
+    rows = session.execute(
+        select(ReportCard)
+        .where(ReportCard.ticker == ticker.upper())
+        .order_by(ReportCard.accepted_at.asc(), ReportCard.filed_date.asc(), ReportCard.created_at.asc())
+    ).scalars().all()
+    timeline = build_company_change_timeline(rows, limit=limit)
+    if timeline is None:
+        raise HTTPException(status_code=404, detail="No report-card history found")
+    return CompanyChangeTimelineResponse(**timeline)
 
 
 @app.post("/api/paper-books/lane1/launch", response_model=ActionResultResponse)
