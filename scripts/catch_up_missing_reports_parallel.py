@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from accountant.config import get_settings
@@ -79,12 +79,20 @@ def _parse_args() -> argparse.Namespace:
 def _load_missing_report_rows(factory, limit: int | None) -> list[tuple[object, str]]:
     session = factory()
     try:
+        primary_ticker = (
+            select(
+                Security.company_id.label("company_id"),
+                func.min(Security.ticker).label("ticker"),
+            )
+            .group_by(Security.company_id)
+            .subquery()
+        )
         stmt = (
-            select(Company.id, Security.ticker)
-            .join(Security, Security.company_id == Company.id)
+            select(Company.id, primary_ticker.c.ticker)
+            .join(primary_ticker, primary_ticker.c.company_id == Company.id)
             .outerjoin(CompanyReport, CompanyReport.company_id == Company.id)
             .where(CompanyReport.id.is_(None))
-            .order_by(Security.ticker.asc())
+            .order_by(primary_ticker.c.ticker.asc())
         )
         rows = [(company_id, ticker) for company_id, ticker in session.execute(stmt).all()]
         if limit is not None:
