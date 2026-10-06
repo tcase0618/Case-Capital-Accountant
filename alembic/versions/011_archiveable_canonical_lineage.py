@@ -3,7 +3,7 @@
 from alembic import op
 
 
-revision = "011_archiveable_canonical_lineage"
+revision = "011"
 down_revision = "010"
 branch_labels = None
 depends_on = None
