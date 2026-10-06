@@ -28,23 +28,8 @@ def upgrade() -> None:
     op.execute(
         "ALTER TABLE canonical_facts ADD COLUMN IF NOT EXISTS raw_fact_archived BOOLEAN NOT NULL DEFAULT FALSE"
     )
-    op.execute(
-        """
-        UPDATE canonical_facts c
-        SET source_fact_hash = r.fact_hash,
-            source_accession_number = r.accession_number,
-            source_url = r.source_url,
-            source_accepted_at = r.accepted_at,
-            source_filed_date = r.filed_date,
-            source_period_end = r.period_end,
-            source_concept = r.concept,
-            source_taxonomy = r.taxonomy,
-            source_filing_form = r.form
-        FROM raw_facts r
-        WHERE c.raw_fact_id = r.id
-          AND c.source_fact_hash IS NULL
-        """
-    )
+    # The existing 1.5M-row lineage snapshot is backfilled by the bounded
+    # maintenance job, not during API startup. This keeps deploys bounded.
 
 
 def downgrade() -> None:
