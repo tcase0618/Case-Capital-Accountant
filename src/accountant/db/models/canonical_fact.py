@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from accountant.db.base import Base
@@ -27,8 +27,8 @@ class CanonicalFact(Base):
     company_id: Mapped[uuid.UUID] = mapped_column(
         UUID(), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    raw_fact_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(), ForeignKey("raw_facts.id", ondelete="CASCADE"), nullable=False, index=True
+    raw_fact_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(), ForeignKey("raw_facts.id", ondelete="SET NULL"), nullable=True, index=True
     )
     canonical_concept_id: Mapped[uuid.UUID] = mapped_column(
         UUID(), ForeignKey("canonical_concepts.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -41,6 +41,16 @@ class CanonicalFact(Base):
     mapping_confidence: Mapped[str] = mapped_column(String(32), nullable=False, default="HIGH")
     reported_or_derived: Mapped[str] = mapped_column(String(32), nullable=False, default="reported")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_fact_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_accession_number: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_filed_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_concept: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_filing_form: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    raw_fact_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

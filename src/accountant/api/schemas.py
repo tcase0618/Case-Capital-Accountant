@@ -108,7 +108,7 @@ class CanonicalFactResponse(BaseModel):
 
     id: UUID
     company_id: UUID
-    raw_fact_id: UUID
+    raw_fact_id: UUID | None
     canonical_concept_code: str
     canonical_label: str | None
     value: str | None

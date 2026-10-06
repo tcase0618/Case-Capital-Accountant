@@ -960,13 +960,17 @@ def get_company_canonical_facts(
     stmt = (
         select(CanonicalFact, CanonicalConcept, RawFact, Filing)
         .join(CanonicalConcept, CanonicalConcept.id == CanonicalFact.canonical_concept_id)
-        .join(RawFact, RawFact.id == CanonicalFact.raw_fact_id)
-        .join(Filing, Filing.id == RawFact.filing_id)
+        .outerjoin(RawFact, RawFact.id == CanonicalFact.raw_fact_id)
+        .outerjoin(Filing, Filing.id == RawFact.filing_id)
         .where(CanonicalFact.company_id == company.id)
     )
     if concept_code:
         stmt = stmt.where(CanonicalConcept.code == concept_code)
-    stmt = stmt.order_by(RawFact.period_end.desc(), CanonicalFact.created_at.desc()).limit(limit)
+    stmt = stmt.order_by(
+        RawFact.period_end.desc().nullslast(),
+        CanonicalFact.source_period_end.desc().nullslast(),
+        CanonicalFact.created_at.desc(),
+    ).limit(limit)
 
     results = []
     for canonical_fact, canonical_concept, raw_fact, filing in session.execute(stmt).all():
@@ -985,11 +989,11 @@ def get_company_canonical_facts(
                 mapping_confidence=canonical_fact.mapping_confidence,
                 reported_or_derived=canonical_fact.reported_or_derived,
                 notes=canonical_fact.notes,
-                raw_taxonomy=raw_fact.taxonomy,
-                raw_concept=raw_fact.concept,
-                accession_number=raw_fact.accession_number,
-                filing_form=filing.form_type,
-                period_end=raw_fact.period_end,
+                raw_taxonomy=raw_fact.taxonomy if raw_fact else canonical_fact.source_taxonomy,
+                raw_concept=raw_fact.concept if raw_fact else canonical_fact.source_concept,
+                accession_number=raw_fact.accession_number if raw_fact else canonical_fact.source_accession_number,
+                filing_form=filing.form_type if filing else canonical_fact.source_filing_form,
+                period_end=raw_fact.period_end if raw_fact else canonical_fact.source_period_end,
             )
         )
     return results
