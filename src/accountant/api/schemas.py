@@ -320,6 +320,8 @@ class AccountantIntegrationStatusResponse(BaseModel):
     companies_with_canonical_facts: int = 0
     companies_with_statement_snapshots: int = 0
     operating_mode: str = "standalone_research"
+    machine_enabled: bool = False
+    coverage_pct: float = 0.0
     terminal_handoff_allowed: bool = False
     execution_allowed: bool = False
 

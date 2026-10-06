@@ -1704,7 +1704,8 @@ def report_machine_status() -> ReportMachineStatusResponse:
 @app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse)
 def accountant_integration_status(session: SessionDep) -> AccountantIntegrationStatusResponse:
     machine = MACHINE.snapshot()
-    mode = operating_mode_payload(get_settings())
+    settings = get_settings()
+    mode = operating_mode_payload(settings)
     bind = session.get_bind()
     use_background_metrics = _should_use_background_dashboard_metrics(str(bind.url))
     metrics = _ensure_dashboard_metrics_refresh() if use_background_metrics else {
@@ -1712,23 +1713,41 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         "companies_with_canonical_facts": _exists_company_count(session, CanonicalFact),
         "companies_with_statement_snapshots": _exists_company_count(session, StatementSnapshot),
     }
+    total_companies = (
+        int(metrics.get("total_companies") or 0)
+        if use_background_metrics
+        else int(session.execute(select(func.count()).select_from(Company)).scalar_one())
+    )
     companies_with_report_cards = _exists_company_count(session, ReportCard)
+    coverage_pct = (
+        round((int(metrics.get("companies_with_reports") or 0) / total_companies) * 100, 2)
+        if total_companies
+        else 0.0
+    )
     ready = (
-        int(machine.get("runnable_companies") or 0) == 0
+        bool(settings.machine_enabled)
+        and bool(mode["terminal_handoff_allowed"])
+        and int(machine.get("runnable_companies") or 0) == 0
         and int(machine.get("blocked_companies") or 0) == 0
         and int(metrics.get("companies_with_reports") or 0) > 0
         and companies_with_report_cards > 0
+        and coverage_pct >= 95.0
     )
-    completion_state = (
-        "complete"
-        if ready
-        else ("blocked" if int(machine.get("blocked_companies") or 0) > 0 else "processing")
-    )
+    if not settings.machine_enabled:
+        completion_state = "paused"
+    elif int(machine.get("blocked_companies") or 0) > 0:
+        completion_state = "blocked"
+    elif ready:
+        completion_state = "complete"
+    elif bool(machine.get("running")):
+        completion_state = "processing"
+    else:
+        completion_state = "idle"
     return AccountantIntegrationStatusResponse(
         generated_at=datetime.now(UTC).isoformat(),
         ready_for_readonly_integration=ready,
         completion_state=completion_state,
-        total_companies=int(machine.get("total_companies") or 0),
+        total_companies=total_companies,
         reports_cached=int(machine.get("reports_cached") or 0),
         pending_companies=int(machine.get("pending_companies") or 0),
         runnable_companies=int(machine.get("runnable_companies") or 0),
@@ -1741,6 +1760,8 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         companies_with_canonical_facts=int(metrics.get("companies_with_canonical_facts") or 0),
         companies_with_statement_snapshots=int(metrics.get("companies_with_statement_snapshots") or 0),
         operating_mode=str(mode["mode"]),
+        machine_enabled=bool(settings.machine_enabled),
+        coverage_pct=coverage_pct,
         terminal_handoff_allowed=bool(mode["terminal_handoff_allowed"]),
         execution_allowed=False,
     )
