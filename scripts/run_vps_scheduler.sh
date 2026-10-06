@@ -3,9 +3,10 @@ set -euo pipefail
 
 poll_windows="${ACCOUNTANT_POLL_WINDOWS:-06:00-09:30,16:00-22:00}"
 active_interval_seconds="${ACCOUNTANT_ACTIVE_POLL_INTERVAL_SECONDS:-900}"
+python_bin="${ACCOUNTANT_PYTHON_BIN:-.venv/bin/python}"
 
 while true; do
-  sleep_seconds="$(python scripts/scheduler_timing.py \
+  sleep_seconds="$("$python_bin" scripts/scheduler_timing.py \
     --windows "$poll_windows" \
     --active-interval-seconds "$active_interval_seconds")"
   if [ "$sleep_seconds" -gt 0 ]; then
@@ -16,7 +17,7 @@ while true; do
   started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "[$started_at] accountant automation cycle starting"
 
-  python scripts/run_accountant_automation.py \
+  "$python_bin" scripts/run_accountant_automation.py \
     --import-workers "${ACCOUNTANT_IMPORT_WORKERS:-4}" \
     --refresh-workers "${ACCOUNTANT_REFRESH_WORKERS:-4}" \
     --score-workers "${ACCOUNTANT_SCORE_WORKERS:-2}" \
