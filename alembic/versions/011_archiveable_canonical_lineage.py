@@ -4,7 +4,7 @@ from alembic import op
 
 
 revision = "011_archiveable_canonical_lineage"
-down_revision = "010_postgres_timestamp_defaults"
+down_revision = "010"
 branch_labels = None
 depends_on = None
 
