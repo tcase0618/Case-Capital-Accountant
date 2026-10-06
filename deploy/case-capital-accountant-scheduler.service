@@ -1,0 +1,17 @@
+[Unit]
+Description=Case Capital Accountant unattended research scheduler
+After=network-online.target postgresql@16-main.service case-capital-accountant.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/case-capital/accountant
+EnvironmentFile=/opt/case-capital/accountant/.env.production
+ExecStart=/bin/bash scripts/run_vps_scheduler.sh
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
