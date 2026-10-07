@@ -34,6 +34,7 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         session,
         "select count(*) from canonical_facts where source_fact_hash is not null or raw_fact_id is not null",
     )
+    canonical_fact_count_exact = _exact_scalar(session, "select count(*) from canonical_facts")
     statement_snapshot_count = _exact_scalar(session, "select count(*) from statement_snapshots")
     report_count = _exact_scalar(session, "select count(*) from company_reports")
     report_card_count = _exact_scalar(session, "select count(*) from report_cards")
@@ -71,7 +72,7 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
     report_coverage_pct = _pct(report_count, company_count)
     bottleneck_coverage_pct = _pct(bottleneck_count, report_count)
     canonical_to_raw_pct = _pct(canonical_fact_count, raw_fact_count) if raw_fact_count else None
-    canonical_lineage_coverage_pct = _pct(canonical_lineage_count, canonical_fact_count)
+    canonical_lineage_coverage_pct = _pct(canonical_lineage_count, canonical_fact_count_exact)
     statement_to_report_pct = _pct(statement_snapshot_count, report_count)
 
     warnings: list[str] = []
