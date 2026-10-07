@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=casecapital
+Group=casecapital
 WorkingDirectory=/opt/case-capital/accountant
 EnvironmentFile=/opt/case-capital/accountant/.env.production
 ExecStart=/bin/bash scripts/run_vps_scheduler.sh

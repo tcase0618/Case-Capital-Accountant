@@ -41,6 +41,9 @@ jobs:
       - name: Ruff
         run: uv run ruff check src tests
 
+      - name: Mypy
+        run: uv run mypy src/accountant/api/auth.py src/accountant/config.py --ignore-missing-imports
+
       - name: Pytest
         run: uv run pytest
 
@@ -49,6 +52,10 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    env:
+      POSTGRES_USER: accountant
+      POSTGRES_PASSWORD: ci_compose_validation
+      POSTGRES_DB: accountant
     steps:
       - uses: actions/checkout@v4
 

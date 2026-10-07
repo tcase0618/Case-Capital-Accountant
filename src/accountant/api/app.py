@@ -13,9 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from accountant.analysis.point_in_time_engine import PointInTimeResolver
+from accountant.api.auth import require_api_token
 from accountant.api.schemas import (
     AccountantIntegrationStatusResponse,
     AccountantIntegrationTickerResponse,
@@ -155,16 +157,20 @@ _API_SESSION_FACTORY = create_session_factory(_API_ENGINE)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3002",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3002",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
+    allow_origins=(
+        [origin.strip().rstrip("/") for origin in get_settings().cors_origins.split(",") if origin.strip()]
+        if get_settings().cors_origins.strip()
+        else [
+            "http://localhost:3000",
+            "http://localhost:3002",
+            "http://localhost:5173",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3002",
+            "http://127.0.0.1:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+        ]
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -709,7 +715,11 @@ def _latest_report_for_company(session: Session, company_id: Any) -> CompanyRepo
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+def health(session: SessionDep) -> dict[str, str]:
+    try:
+        session.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database health check failed.") from exc
     return {"status": "ok"}
 
 
@@ -1152,7 +1162,7 @@ def get_taxonomy(
     return response
 
 
-@app.post("/api/companies/{ticker}/ingest/filings", response_model=ActionResultResponse)
+@app.post("/api/companies/{ticker}/ingest/filings", response_model=ActionResultResponse, dependencies=[Depends(require_api_token)])
 def ingest_filings_action(ticker: str, session: SessionDep) -> ActionResultResponse:
     client = SecClient()
     try:
@@ -1172,7 +1182,7 @@ def ingest_filings_action(ticker: str, session: SessionDep) -> ActionResultRespo
         client.close()
 
 
-@app.post("/api/companies/{ticker}/ingest/companyfacts", response_model=ActionResultResponse)
+@app.post("/api/companies/{ticker}/ingest/companyfacts", response_model=ActionResultResponse, dependencies=[Depends(require_api_token)])
 def ingest_companyfacts_action(ticker: str, session: SessionDep) -> ActionResultResponse:
     sec_client = SecClient()
     companyfacts_client = CompanyFactsClient(get_settings(), sec_client=sec_client)
@@ -1199,7 +1209,7 @@ def ingest_companyfacts_action(ticker: str, session: SessionDep) -> ActionResult
         companyfacts_client.close()
 
 
-@app.post("/api/companies/{ticker}/normalize", response_model=ActionResultResponse)
+@app.post("/api/companies/{ticker}/normalize", response_model=ActionResultResponse, dependencies=[Depends(require_api_token)])
 def normalize_action(
     ticker: str,
     session: SessionDep,
@@ -1254,7 +1264,7 @@ def normalize_action(
     )
 
 
-@app.post("/api/coverage/import", response_model=UniverseImportResponse)
+@app.post("/api/coverage/import", response_model=UniverseImportResponse, dependencies=[Depends(require_api_token)])
 def import_coverage_universe(
     payload: UniverseImportRequest,
     session: SessionDep,
@@ -1633,7 +1643,7 @@ def get_company_change_timeline(
     return CompanyChangeTimelineResponse(**timeline)
 
 
-@app.post("/api/paper-books/lane1/launch", response_model=ActionResultResponse)
+@app.post("/api/paper-books/lane1/launch", response_model=ActionResultResponse, dependencies=[Depends(require_api_token)])
 def launch_lane1_book(
     session: SessionDep,
     launch_date: str | None = Query(default=None),
@@ -1808,7 +1818,7 @@ def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> Ac
     )
 
 
-@app.post("/api/reports/run-once", response_model=ReportMachineStatusResponse)
+@app.post("/api/reports/run-once", response_model=ReportMachineStatusResponse, dependencies=[Depends(require_api_token)])
 def run_report_machine_once() -> ReportMachineStatusResponse:
     return ReportMachineStatusResponse(**MACHINE.run_once())
 
@@ -1868,7 +1878,7 @@ def buy_board_status() -> BuyBoardStatusResponse:
     return BuyBoardStatusResponse(**BUY_BOARD.snapshot())
 
 
-@app.post("/api/buy-board/refresh", response_model=BuyBoardStatusResponse)
+@app.post("/api/buy-board/refresh", response_model=BuyBoardStatusResponse, dependencies=[Depends(require_api_token)])
 def refresh_buy_board() -> BuyBoardStatusResponse:
     payload = BUY_BOARD.run_once()
     payload.pop("manual_refresh", None)

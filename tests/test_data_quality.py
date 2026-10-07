@@ -8,6 +8,20 @@ from accountant.research.data_quality_engine import (
     DataQualityTier,
     ResearchDataQualityEngine,
 )
+from accountant.research.source_integrity import _source_grade
+
+
+def test_archived_raw_facts_do_not_create_false_mapping_failure() -> None:
+    assert (
+        _source_grade(
+            latest_days=0,
+            report_coverage_pct=100.0,
+            bottleneck_coverage_pct=100.0,
+            canonical_to_raw_pct=None,
+            warnings=[],
+        )
+        == "STRONG"
+    )
 
 
 class TestCoverageScore:

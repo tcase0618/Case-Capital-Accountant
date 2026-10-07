@@ -22,6 +22,14 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://accountant:accountant@127.0.0.1:5432/accountant"
     )
     accountant_env: str = Field(default="development")
+    api_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("ACCOUNTANT_API_TOKEN", "api_token"),
+    )
+    cors_origins: str = Field(
+        default="",
+        validation_alias=AliasChoices("ACCOUNTANT_CORS_ORIGINS", "cors_origins"),
+    )
     log_level: str = Field(default="INFO")
     data_dir: Path = Field(default=Path("./data"))
     market_data_mode: str = Field(default="research_only")

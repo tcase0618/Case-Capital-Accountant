@@ -38,6 +38,12 @@ COPY data/raw/.gitkeep data/raw/.gitkeep
 COPY data/duckdb/.gitkeep data/duckdb/.gitkeep
 COPY data/parquet/.gitkeep data/parquet/.gitkeep
 
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin accountant \
+    && mkdir -p /app/data /app/artifacts /backups \
+    && chown -R accountant:accountant /app /backups
+
+USER accountant
+
 EXPOSE 8000
 
 CMD ["uvicorn", "accountant.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

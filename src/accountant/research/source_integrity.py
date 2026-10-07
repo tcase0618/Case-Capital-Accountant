@@ -30,6 +30,10 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         if is_postgres
         else _exact_scalar(session, "select count(*) from canonical_facts")
     )
+    canonical_lineage_count = _exact_scalar(
+        session,
+        "select count(*) from canonical_facts where source_fact_hash is not null or raw_fact_id is not null",
+    )
     statement_snapshot_count = _exact_scalar(session, "select count(*) from statement_snapshots")
     report_count = _exact_scalar(session, "select count(*) from company_reports")
     report_card_count = _exact_scalar(session, "select count(*) from report_cards")
@@ -66,7 +70,8 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
 
     report_coverage_pct = _pct(report_count, company_count)
     bottleneck_coverage_pct = _pct(bottleneck_count, report_count)
-    canonical_to_raw_pct = _pct(canonical_fact_count, raw_fact_count)
+    canonical_to_raw_pct = _pct(canonical_fact_count, raw_fact_count) if raw_fact_count else None
+    canonical_lineage_coverage_pct = _pct(canonical_lineage_count, canonical_fact_count)
     statement_to_report_pct = _pct(statement_snapshot_count, report_count)
 
     warnings: list[str] = []
@@ -76,11 +81,13 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         warnings.append(f"Latest SEC filing date is {days_since_latest} days old.")
     if raw_source_sample and any(item["source"] != "companyfacts" for item in raw_source_sample):
         warnings.append("Raw fact sample includes non-CompanyFacts source types.")
+    if raw_fact_count == 0 and canonical_fact_count > 0:
+        warnings.append("Raw SEC facts are archived off-host; canonical records rely on stored lineage.")
     if report_coverage_pct < 95:
         warnings.append("Company report coverage is below 95%.")
     if bottleneck_coverage_pct < 95:
         warnings.append("Bottleneck cache coverage is below 95% of reports.")
-    if canonical_to_raw_pct < 10:
+    if canonical_to_raw_pct is not None and canonical_to_raw_pct < 10:
         warnings.append("Canonical mapping coverage is below 10% of raw facts.")
     if not price_sources or all(item["source"] == "NONE" for item in price_sources):
         warnings.append("No buy-board market price source is currently populated.")
@@ -106,7 +113,11 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
             "filings_count_estimate": filings_count,
             "raw_facts_count_estimate": raw_fact_count,
             "raw_fact_source_sample": raw_source_sample,
-            "sec_first": bool(raw_source_sample and all(item["source"] == "companyfacts" for item in raw_source_sample)),
+            "sec_first": (
+                all(item["source"] == "companyfacts" for item in raw_source_sample)
+                if raw_source_sample
+                else None
+            ),
         },
         "coverage": {
             "companies": company_count,
@@ -117,7 +128,8 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
             "bottleneck_snapshots": bottleneck_count,
             "report_coverage_pct": round(report_coverage_pct, 2),
             "bottleneck_coverage_pct": round(bottleneck_coverage_pct, 2),
-            "canonical_to_raw_pct": round(canonical_to_raw_pct, 2),
+            "canonical_to_raw_pct": round(canonical_to_raw_pct, 2) if canonical_to_raw_pct is not None else None,
+            "canonical_lineage_coverage_pct": round(canonical_lineage_coverage_pct, 2),
             "statement_to_report_pct": round(statement_to_report_pct, 2),
         },
         "market_data": {
@@ -138,12 +150,14 @@ def _source_grade(
     latest_days: int | None,
     report_coverage_pct: float,
     bottleneck_coverage_pct: float,
-    canonical_to_raw_pct: float,
+    canonical_to_raw_pct: float | None,
     warnings: list[str],
 ) -> str:
     if latest_days is None or report_coverage_pct < 70 or bottleneck_coverage_pct < 70:
         return "FAILED"
-    if latest_days > 7 or report_coverage_pct < 90 or canonical_to_raw_pct < 5:
+    if latest_days > 7 or report_coverage_pct < 90 or (
+        canonical_to_raw_pct is not None and canonical_to_raw_pct < 5
+    ):
         return "DEGRADED"
     if warnings:
         return "WATCH"

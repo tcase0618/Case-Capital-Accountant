@@ -167,9 +167,11 @@ def _seed_company_with_filings_and_facts(test_session) -> Company:
     return company
 
 
-def test_health() -> None:
+def test_health(test_session) -> None:
+    app.dependency_overrides[get_session] = _session_override(test_session)
     client = TestClient(app)
     response = client.get("/health")
+    app.dependency_overrides.clear()
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}

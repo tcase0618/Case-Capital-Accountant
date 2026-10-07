@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -139,6 +140,7 @@ class MachineSnapshot:
     last_cycle_at: str | None = None
     last_action: str | None = None
     last_error: str | None = None
+    recent_errors: list[dict[str, str]] = field(default_factory=list)
     total_companies: int = 0
     reports_cached: int = 0
     processed_cycles: int = 0
@@ -193,6 +195,7 @@ class ContinuousResearchMachine:
                 "last_cycle_at": self._snapshot.last_cycle_at,
                 "last_action": self._snapshot.last_action,
                 "last_error": self._snapshot.last_error,
+                "recent_errors": [dict(item) for item in self._snapshot.recent_errors],
                 "total_companies": self._snapshot.total_companies,
                 "reports_cached": self._snapshot.reports_cached,
                 "processed_cycles": self._snapshot.processed_cycles,
@@ -259,6 +262,31 @@ class ContinuousResearchMachine:
             self._snapshot.last_action = action
             self._snapshot.last_cycle_at = datetime.now(UTC).isoformat()
 
+    def _record_error(
+        self,
+        error: Exception | str,
+        *,
+        worker_index: int | None = None,
+        role: str | None = None,
+        ticker: str | None = None,
+    ) -> None:
+        error_text = _safe_error_text(error)[:500] if isinstance(error, Exception) else str(error)[:500]
+        event = {
+            "at": datetime.now(UTC).isoformat(),
+            "error": error_text,
+        }
+        if worker_index is not None:
+            event["worker_id"] = str(worker_index + 1)
+        if role:
+            event["role"] = role
+        if ticker:
+            event["ticker"] = ticker
+        with self._lock:
+            self._snapshot.last_error = error_text
+            self._snapshot.recent_errors.append(event)
+            self._snapshot.recent_errors = self._snapshot.recent_errors[-20:]
+            self._snapshot.last_cycle_at = datetime.now(UTC).isoformat()
+
     def _run(self) -> None:
         interval = max(5, get_settings().machine_interval_seconds)
         try:
@@ -266,11 +294,8 @@ class ContinuousResearchMachine:
                 try:
                     has_pending = self._run_cycle()
                 except Exception as exc:  # pragma: no cover - daemon runtime protection
-                    error_text = _safe_error_text(exc)
-                    log.error("machine.cycle_failed", error=error_text)
-                    with self._lock:
-                        self._snapshot.last_error = error_text[:500]
-                        self._snapshot.last_cycle_at = datetime.now(UTC).isoformat()
+                    log.error("machine.cycle_failed", error=_safe_error_text(exc), exc_info=True)
+                    self._record_error(exc)
                     has_pending = True
                 self._wake.wait(timeout=0 if has_pending else interval)
                 self._wake.clear()
@@ -507,14 +532,49 @@ class ContinuousResearchMachine:
                         last_action="company missing",
                     )
                     return
-                processed_ticker = self._process_company_lane(
-                    session,
-                    company,
-                    ticker,
-                    worker_index,
-                    lane=lane,
-                    role=role,
-                )
+                processed_ticker: str | None = None
+                worker_failed = False
+                for attempt in range(2):
+                    try:
+                        processed_ticker = self._process_company_lane(
+                            session,
+                            company,
+                            ticker,
+                            worker_index,
+                            lane=lane,
+                            role=role,
+                        )
+                        break
+                    except Exception as exc:
+                        worker_failed = True
+                        session.rollback()
+                        self._record_error(
+                            exc,
+                            worker_index=worker_index,
+                            role=role,
+                            ticker=ticker,
+                        )
+                        log.error(
+                            "machine.worker_failed",
+                            worker_id=worker_index + 1,
+                            role=role,
+                            ticker=ticker,
+                            attempt=attempt + 1,
+                            error=_safe_error_text(exc),
+                            exc_info=True,
+                        )
+                        if attempt == 0:
+                            time.sleep(0.5)
+                if processed_ticker is None and worker_failed:
+                    self._set_worker_state(
+                        worker_index,
+                        role=role,
+                        ticker=None,
+                        status="error",
+                        last_action=f"failed {ticker}; retry exhausted",
+                        last_completed_ticker=ticker,
+                    )
+                    return
                 if processed_ticker:
                     with processed_lock:
                         processed.append(processed_ticker)

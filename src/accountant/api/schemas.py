@@ -703,6 +703,7 @@ class ReportMachineStatusResponse(BaseModel):
     last_cycle_at: str | None = None
     last_action: str | None = None
     last_error: str | None = None
+    recent_errors: list[dict[str, str]] = []
     total_companies: int
     reports_cached: int
     processed_cycles: int
