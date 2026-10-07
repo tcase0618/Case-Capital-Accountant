@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 from dataclasses import dataclass, field
@@ -7,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -37,6 +38,7 @@ from accountant.ingest.filings import (
 )
 from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
+from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
 from accountant.research.bottleneck_engine import upsert_company_bottleneck_snapshot
 from accountant.research.buy_board import (
     _estimate_cc_valuation,
@@ -152,6 +154,8 @@ class MachineSnapshot:
     universe_counts: dict[str, int] = field(default_factory=dict)
     last_universe_sync_date: str | None = None
     worker_states: list[dict[str, str | int | None]] = field(default_factory=list)
+    storage_blocked: bool = False
+    storage_block_reason: str | None = None
 
 
 class ContinuousResearchMachine:
@@ -207,6 +211,8 @@ class ContinuousResearchMachine:
                 "universe_counts": dict(self._snapshot.universe_counts),
                 "last_universe_sync_date": self._snapshot.last_universe_sync_date,
                 "worker_states": [dict(item) for item in self._snapshot.worker_states],
+                "storage_blocked": self._snapshot.storage_blocked,
+                "storage_block_reason": self._snapshot.storage_block_reason,
             }
 
     def _blank_worker_states(self) -> list[dict[str, str | int | None]]:
@@ -307,6 +313,17 @@ class ContinuousResearchMachine:
         engine = create_db_engine()
         factory = create_session_factory(engine)
         try:
+            storage_decision = self._storage_preflight(engine)
+            if not storage_decision.allowed:
+                with self._lock:
+                    self._snapshot.storage_blocked = True
+                    self._snapshot.storage_block_reason = storage_decision.reason
+                    self._snapshot.last_action = f"storage gate blocked: {storage_decision.reason}"
+                return False
+            with self._lock:
+                self._snapshot.storage_blocked = False
+                self._snapshot.storage_block_reason = None
+
             session = factory()
             try:
                 self._sync_universes_if_needed(session)
@@ -342,6 +359,31 @@ class ContinuousResearchMachine:
         finally:
             engine.dispose()
         return progress["runnable_companies"] > 0
+
+    def _storage_preflight(self, engine) -> Any:
+        settings = get_settings()
+        budget = StorageBudget(
+            max_database_gb=settings.storage_max_database_gb,
+            min_free_disk_gb=settings.storage_min_free_disk_gb,
+            max_cycle_growth_gb=settings.storage_max_cycle_growth_gb,
+        )
+        if engine.dialect.name == "postgresql":
+            with engine.connect() as connection:
+                database_bytes = int(
+                    connection.execute(text("select pg_database_size(current_database())")).scalar() or 0
+                )
+        else:
+            database_bytes = 0
+        data_path = settings.data_dir if settings.data_dir.exists() else settings.data_dir.parent
+        disk_free_bytes = shutil.disk_usage(data_path).free
+        reserved_bytes = max(0, settings.storage_worker_reserve_mb) * 1024 * 1024
+        return evaluate_storage_budget(
+            budget,
+            database_bytes=database_bytes,
+            disk_free_bytes=disk_free_bytes,
+            cycle_start_database_bytes=database_bytes,
+            reserved_bytes=reserved_bytes,
+        )
 
     def _sync_universes_if_needed(self, session: Session) -> None:
         settings = get_settings()

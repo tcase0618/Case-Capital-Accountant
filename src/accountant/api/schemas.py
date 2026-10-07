@@ -715,6 +715,8 @@ class ReportMachineStatusResponse(BaseModel):
     universe_counts: dict[str, int]
     last_universe_sync_date: str | None = None
     worker_states: list[ReportWorkerStatusResponse] = []
+    storage_blocked: bool = False
+    storage_block_reason: str | None = None
 
 
 class ReportWorkerStatusResponse(BaseModel):
