@@ -48,7 +48,7 @@ import {
   ShieldCheck
 } from "lucide-react";
 
-import { api } from "./lib/api";
+import { api, setApiToken } from "./lib/api";
 import caseCapitalLogo from "./assets/case-capital-logo.png";
 
 const accent = "#c8a84b";
@@ -379,6 +379,26 @@ function SystemBar() {
   );
 }
 
+function OperatorTokenBar() {
+  const [draft, setDraft] = useState("");
+  const [configured, setConfigured] = useState(false);
+  return (
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      setApiToken(draft);
+      setConfigured(Boolean(draft.trim()));
+      setDraft("");
+    }} style={{ display: "flex", gap: 8, alignItems: "center", padding: "6px 18px", background: pageBg, color: labelLight, fontSize: 11 }}>
+      <label htmlFor="operator-token">Operator API token</label>
+      <input id="operator-token" type="password" autoComplete="off" value={draft}
+        onChange={(event) => setDraft(event.target.value)} placeholder="Enter token for protected requests" />
+      <button type="submit">Use token</button>
+      <button type="button" onClick={() => { setApiToken(""); setDraft(""); setConfigured(false); }}>Clear</button>
+      <span>{configured ? "Token active in memory until reload" : "Token not set"}</span>
+    </form>
+  );
+}
+
 function CrtShell() {
   const {
     companies,
@@ -698,6 +718,7 @@ function CrtShell() {
         <main className="terminal-main">
           <div style={{ position: "sticky", top: 0, zIndex: 10 }}>
             <SystemBar />
+            <OperatorTokenBar />
             {location.pathname === "/command-center" && <FilingTape items={filingTape} />}
           </div>
 

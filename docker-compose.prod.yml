@@ -8,7 +8,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-accountant}
     volumes:
       - accountant_postgres:/var/lib/postgresql/data
-      - accountant_backups:/backups
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-accountant} -d ${POSTGRES_DB:-accountant}"]
       interval: 10s
@@ -33,13 +32,13 @@ services:
       ACCOUNTANT_HOST: 0.0.0.0
       ACCOUNTANT_PORT: 8010
     ports:
-      - "${ACCOUNTANT_PUBLIC_PORT:-8010}:8010"
+      - "127.0.0.1:${ACCOUNTANT_PUBLIC_PORT:-8010}:8010"
     volumes:
       - accountant_data:/app/data
       - accountant_artifacts:/app/artifacts
     command: ["bash", "scripts/start_api.sh"]
     healthcheck:
-      test: ["CMD-SHELL", "python scripts/vps_readiness_check.py --base-url http://127.0.0.1:8010 --max-sec-staleness-days ${ACCOUNTANT_MAX_SEC_STALENESS_DAYS:-3} || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=10)"]
       interval: 60s
       timeout: 45s
       retries: 3
@@ -71,9 +70,7 @@ services:
     command: ["bash", "scripts/run_vps_scheduler.sh"]
 
   backup:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: postgres:16-bookworm
     restart: unless-stopped
     depends_on:
       postgres:
@@ -84,12 +81,16 @@ services:
       ACCOUNTANT_BACKUP_RETENTION_DAYS: ${ACCOUNTANT_BACKUP_RETENTION_DAYS:-14}
     volumes:
       - accountant_backups:/backups
+      - ./scripts:/scripts:ro
     command:
       - bash
       - -lc
       - |
+        mkdir -p /backups
+        chown postgres:postgres /backups
+        chmod 700 /backups
         while true; do
-          bash scripts/backup_postgres.sh
+          gosu postgres bash /scripts/backup_postgres.sh
           sleep "${ACCOUNTANT_BACKUP_INTERVAL_SECONDS:-86400}"
         done
 

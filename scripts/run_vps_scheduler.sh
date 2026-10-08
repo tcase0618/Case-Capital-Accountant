@@ -12,19 +12,23 @@ while true; do
   if [ "$sleep_seconds" -gt 0 ]; then
     echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] scheduler sleeping ${sleep_seconds}s until the next SEC poll"
     sleep "$sleep_seconds"
+    continue
   fi
 
   started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "[$started_at] accountant automation cycle starting"
 
-  "$python_bin" scripts/run_accountant_automation.py \
+  if ! "$python_bin" scripts/run_accountant_automation.py \
     --import-workers "${ACCOUNTANT_IMPORT_WORKERS:-4}" \
     --refresh-workers "${ACCOUNTANT_REFRESH_WORKERS:-4}" \
     --score-workers "${ACCOUNTANT_SCORE_WORKERS:-2}" \
     ${ACCOUNTANT_SKIP_IMPORT:+--skip-import} \
     ${ACCOUNTANT_SKIP_STALE_REFRESH:+--skip-stale-refresh} \
-    ${ACCOUNTANT_REFRESH_ALL_SCORES:+--refresh-all-scores}
+    ${ACCOUNTANT_REFRESH_ALL_SCORES:+--refresh-all-scores}; then
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] automation cycle failed; will retry on the next poll" >&2
+  fi
 
   finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "[$finished_at] accountant automation cycle complete"
+  sleep "$active_interval_seconds"
 done

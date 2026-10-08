@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
@@ -47,10 +47,9 @@ def seconds_until_next_poll(
         start_at = datetime.combine(local_now.date(), window.start, tzinfo=EASTERN)
         end_at = datetime.combine(local_now.date(), window.end, tzinfo=EASTERN)
         if start_at <= local_now < end_at:
-            remaining = int((end_at - local_now).total_seconds())
-            return max(1, min(active_interval_seconds, remaining))
+            return 0
         if local_now < start_at:
-            return max(1, int((start_at - local_now).total_seconds()))
+            return max(1, int((start_at.astimezone(UTC) - local_now.astimezone(UTC)).total_seconds()))
 
     next_start = datetime.combine(local_now.date() + timedelta(days=1), windows[0].start, tzinfo=EASTERN)
-    return max(1, int((next_start - local_now).total_seconds()))
+    return max(1, int((next_start.astimezone(UTC) - local_now.astimezone(UTC)).total_seconds()))

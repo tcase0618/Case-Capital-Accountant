@@ -1,5 +1,7 @@
 """Authentication dependencies for state-changing Accountant endpoints."""
 
+import hmac
+
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -26,7 +28,9 @@ def require_api_token(
                 detail="Mutation API authentication is not configured.",
             )
         return "development-no-auth"
-    if credentials is None or credentials.credentials != expected:
+    if credentials is None or not hmac.compare_digest(
+        credentials.credentials.encode("utf-8"), expected.encode("utf-8")
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API token.",
