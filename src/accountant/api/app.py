@@ -574,7 +574,8 @@ _load_companies_cache()
 
 @app.on_event("startup")
 def startup_machine() -> None:
-    Base.metadata.create_all(bind=_API_ENGINE)
+    if not get_settings().is_production:
+        Base.metadata.create_all(bind=_API_ENGINE)
     session = _API_SESSION_FACTORY()
     try:
         ensure_canonical_taxonomy_seeded(session)
@@ -1308,12 +1309,12 @@ def import_coverage_universe(
         sec_client.close()
 
 
-@app.get("/api/integrations/ibkr", response_model=IntegrationStatusResponse)
+@app.get("/api/integrations/ibkr", response_model=IntegrationStatusResponse, dependencies=[Depends(require_api_token)])
 def get_ibkr_integration_status() -> IntegrationStatusResponse:
     return IntegrationStatusResponse(**alpaca_status())
 
 
-@app.get("/api/companies/{ticker}/market-quote", response_model=MarketQuoteResponse)
+@app.get("/api/companies/{ticker}/market-quote", response_model=MarketQuoteResponse, dependencies=[Depends(require_api_token)])
 def get_company_market_quote(ticker: str) -> MarketQuoteResponse:
     return MarketQuoteResponse(**ibkr_quote(ticker))
 

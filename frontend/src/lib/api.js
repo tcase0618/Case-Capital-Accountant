@@ -1,12 +1,18 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+const API_BASE = import.meta.env?.VITE_API_BASE ?? "";
+let apiToken = "";
+
+export function setApiToken(value) {
+  apiToken = String(value ?? "").trim();
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(apiToken ? { Authorization: `Bearer ${apiToken}` } : {}),
       ...(options.headers ?? {})
-    },
-    ...options
+    }
   });
 
   if (!response.ok) {

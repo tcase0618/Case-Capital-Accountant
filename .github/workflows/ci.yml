@@ -30,13 +30,15 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.12.3"
 
       - name: Sync dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Ruff
         run: uv run ruff check src tests
@@ -50,6 +52,15 @@ jobs:
       - name: Alembic migration smoke check
         run: uv run alembic upgrade head
 
+      - name: Backup and isolated restore with PostgreSQL 16
+        run: |
+          mkdir -p "$RUNNER_TEMP/accountant-backups"
+          export SOURCE_URL=postgresql://accountant:accountant@127.0.0.1:5432/accountant
+          export SCRATCH_URL=postgresql://accountant:accountant@127.0.0.1:5432/accountant_restore_test_ci
+          docker run --rm --network host postgres:16-bookworm psql "$SOURCE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE accountant_restore_test_ci'
+          docker run --rm --network host -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP/accountant-backups:/backups" -e DATABASE_URL="$SOURCE_URL" -e ACCOUNTANT_BACKUP_MIN_FREE_BYTES=0 postgres:16-bookworm bash /scripts/backup_postgres.sh
+          docker run --rm --network host -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP/accountant-backups:/backups" -e DATABASE_URL="$SOURCE_URL" -e ACCOUNTANT_RESTORE_TEST_URL="$SCRATCH_URL" postgres:16-bookworm bash -c 'dump=$(find /backups -name "*.dump" -type f -print -quit); test "$(stat -c %a "$dump")" = 600; bash /scripts/verify_backup_restore.sh "$dump"'
+
   docker:
     runs-on: ubuntu-latest
     env:
@@ -60,7 +71,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Validate production compose file
-        run: docker compose -f docker-compose.prod.yml config
+        run: |
+          cp .env.production.example .env.production
+          docker compose -f docker-compose.prod.yml config --quiet
 
       - name: Build production image
         run: docker build -t case-capital-accountant:ci .

@@ -65,7 +65,7 @@ The scheduler polls every 15 minutes during the two EDGAR filing windows configu
 - `06:00-09:30` Eastern: pre-market and opening window.
 - `16:00-22:00` Eastern: post-market filing window.
 
-It sleeps until the next window outside those periods. Each active cycle imports filing metadata since the latest persisted filing. New core financial filings refresh CompanyFacts/raw facts, canonical mappings, statement snapshots, report cards, bottlenecks, research lanes, and sector caches. New material event filings (`8-K`, late-filing notices, SEC correspondence, and amendments) also trigger a report refresh so event flags are not delayed until the next quarterly filing.
+It sleeps until the next window outside those periods. Active cycles use persisted daily-index checkpoints with a three-business-day replay overlap. Failed index dates remain pending; the newest filing is not a discovery watermark. New core financial filings refresh CompanyFacts/raw facts, canonical mappings, statement snapshots, report cards, bottlenecks, research lanes, and sector caches. Material event filings also trigger a report refresh. Deploy the additive migration before enabling this scheduler.
 
 ## First-Time VPS Setup
 
@@ -128,15 +128,11 @@ Manual backup:
 docker compose -f docker-compose.prod.yml exec backup bash scripts/backup_postgres.sh
 ```
 
-Restore drill:
+Restore verification uses an existing, empty scratch database whose name starts with `accountant_restore_test_`. It never drops or restores over the production database. Supply `ACCOUNTANT_RESTORE_TEST_URL` for that isolated database and run `scripts/verify_backup_restore.sh /backups/<backup-file>.dump`. It verifies the checksum and archive listing before restoring, checks row counts against `DATABASE_URL` when provided, and records a verification timestamp. Keep the source database quiescent if comparing exact counts.
 
-```bash
-docker compose -f docker-compose.prod.yml stop api scheduler
-docker compose -f docker-compose.prod.yml exec postgres dropdb -U accountant accountant
-docker compose -f docker-compose.prod.yml exec postgres createdb -U accountant accountant
-docker compose -f docker-compose.prod.yml exec postgres pg_restore -U accountant -d accountant /backups/<backup-file>.dump
-docker compose -f docker-compose.prod.yml up -d api scheduler
-```
+The backup service uses PostgreSQL 16 tools, restrictive permissions, a disk-headroom precheck, and an atomic partial-file handoff. Pull verified dumps and checksums off-host before treating backups as disaster recovery; no off-host destination has been configured by this change.
+
+The API port now binds to loopback. Operators must supply a TLS reverse proxy before external access. Container health uses `/health`; business readiness remains a separate operator check.
 
 ## Known Local Audit Findings From 2026-09-20
 
