@@ -27,6 +27,13 @@ class AnnualFlow:
         }
 
 
+def aligned_value(flow: AnnualFlow | None, anchor: AnnualFlow | None) -> float | None:
+    """Ratios/subtractions may combine only identical duration windows."""
+    if flow is None or anchor is None or (flow.start, flow.end) != (anchor.start, anchor.end):
+        return None
+    return flow.value
+
+
 def annual_flow(facts: list[RawFact], concepts: list[str], *, as_of: date | None = None,
                 weighted_shares: bool = False) -> AnnualFlow | None:
     """Use a complete FY, four adjacent quarters, or FY + YTD - prior YTD.

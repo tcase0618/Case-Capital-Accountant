@@ -46,6 +46,7 @@ class GradingResult:
 
 
 class ReportCardGradingEngine:
+    RULE_VERSION = "REPORT_CARD_GRADING_V2_FORENSIC_COMPLETENESS"
     GRADE_WEIGHTS = {
         "A": 1.0,
         "B": 0.7,
@@ -154,6 +155,12 @@ class ReportCardGradingEngine:
             * _clamp(1.0 - inputs.forensic_score_dispersion, 0.0, 1.0)
             * _clamp(inputs.recency_factor, 0.0, 1.0)
         )
+        # FORENSIC_COMPLETENESS_V1: each of four unavailable severity inputs
+        # removes one quarter of confidence. Unknown risk is not a clean bill
+        # of health, but neither does missing evidence fabricate a hard veto.
+        forensic_inputs = (inputs.beneish_severity, inputs.dechow_severity,
+                           inputs.altman_distress_severity, inputs.event_flag_severity)
+        confidence *= sum(value is not None for value in forensic_inputs) / len(forensic_inputs)
         return _clamp(confidence, 0.0, 1.0)
 
     @classmethod

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -114,7 +115,17 @@ from accountant.taxonomy import get_canonical_registry
 from accountant.taxonomy.seed import ensure_canonical_taxonomy_seeded
 from accountant.xbrl.arelle_adapter import ArelleFacade
 
-app = FastAPI(title="THE ACCOUNTANT", version="0.2.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        startup_machine()
+        yield
+    finally:
+        shutdown_machine()
+
+
+app = FastAPI(title="THE ACCOUNTANT", version="0.2.0", lifespan=lifespan)
 ibkr_quote = alpaca_quote
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -572,7 +583,6 @@ _load_dashboard_metrics_cache()
 _load_companies_cache()
 
 
-@app.on_event("startup")
 def startup_machine() -> None:
     if not get_settings().is_production:
         Base.metadata.create_all(bind=_API_ENGINE)
@@ -591,7 +601,6 @@ def startup_machine() -> None:
         BUY_BOARD.start()
 
 
-@app.on_event("shutdown")
 def shutdown_machine() -> None:
     MACHINE.stop()
     BUY_BOARD.stop()
@@ -863,7 +872,7 @@ def get_dashboard(session: SessionDep) -> DashboardResponse:
     ]
 
     return DashboardResponse(
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(UTC).replace(tzinfo=None).isoformat(),
         stats=stats,
         coverage=coverage,
         recent_filings=recent_filings,

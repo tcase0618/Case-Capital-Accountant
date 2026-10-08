@@ -114,6 +114,8 @@ def _estimate_share_count(session: Session, report: CompanyReport) -> float | No
 
 def _estimate_cc_valuation(session: Session, report: CompanyReport) -> float | None:
     stats = report.key_stats or {}
+    if stats.get("annual_flow_version") != "SEC_TTM_FLOWS_V1":
+        return None
     owner_earnings = _safe_float(stats.get("owner_earnings"))
     net_income = _safe_float(stats.get("net_income"))
     equity = _safe_float(stats.get("equity"))

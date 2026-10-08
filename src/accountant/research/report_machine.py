@@ -40,7 +40,7 @@ from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
 from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
 from accountant.ops.storage_gate import StorageGate
-from accountant.research.annual_flows import FORMULA_VERSION, annual_flow
+from accountant.research.annual_flows import FORMULA_VERSION, aligned_value, annual_flow
 from accountant.research.bottleneck_engine import upsert_company_bottleneck_snapshot
 from accountant.research.buy_board import (
     _estimate_cc_valuation,
@@ -57,6 +57,10 @@ from accountant.research.filing_signal_engine import (
     build_textual_signals,
 )
 from accountant.research.grading_engine import GradingInputs, ReportCardGradingEngine
+from accountant.research.grading_evidence import (
+    build_disclosure_evidence,
+    sustained_beneish_evidence,
+)
 from accountant.research.report_cards import persist_report_card
 from accountant.research.research_controls import build_research_controls, build_valuation_range
 from accountant.research.universe_signal_engine import membership_for_ticker
@@ -961,7 +965,9 @@ class ContinuousResearchMachine:
                 try:
                     facts_data = companyfacts_client.get_company_facts(company.cik)
                     with sqlite_write_guard():
-                        ingest_company_facts_payload(session, company, facts_data)
+                        _, _, _, payload_errors = ingest_company_facts_payload(session, company, facts_data)
+                        if payload_errors:
+                            raise RuntimeError(f"CompanyFacts ingestion has {len(payload_errors)} provenance/payload errors")
                 except SecHttpError as exc:
                     session.rollback()
                     if exc.status_code == 404:
@@ -975,6 +981,7 @@ class ContinuousResearchMachine:
                 except Exception as exc:
                     session.rollback()
                     log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+                    raise
                 finally:
                     companyfacts_client.close()
                 if session.in_transaction():
@@ -1337,13 +1344,13 @@ class ContinuousResearchMachine:
             owner_earnings = ocf - abs(capex)
         gross_flow = annual_flow(facts, ["GrossProfit"])
         cogs_flow = annual_flow(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
-        gross_profit = gross_flow.value if gross_flow else None
-        cogs = cogs_flow.value if cogs_flow else None
+        gross_profit = aligned_value(gross_flow, revenue_flow)
+        cogs = aligned_value(cogs_flow, revenue_flow)
         if gross_profit is None and revenue is not None and cogs is not None:
             gross_profit = revenue - cogs
         gross_margin_pct = _ratio_pct(gross_profit, revenue, ceiling=1000.0)
-        net_margin_pct = _ratio_pct(net_income, revenue, ceiling=1000.0)
-        owner_earnings_margin_pct = _safe_divide(owner_earnings, revenue)
+        net_margin_pct = _ratio_pct(aligned_value(income_flow, revenue_flow), revenue, ceiling=1000.0)
+        owner_earnings_margin_pct = _safe_divide(owner_earnings, revenue) if aligned_value(ocf_flow, revenue_flow) is not None else None
         if owner_earnings_margin_pct is not None:
             owner_earnings_margin_pct *= 100
         dilution_growth_pct = None
@@ -1381,6 +1388,10 @@ class ContinuousResearchMachine:
             has_restatement_history=False,
         )
         factor_pack = build_accounting_factor_pack(facts)
+        disclosure_evidence = build_disclosure_evidence(
+            filings, latest_filing_row, sec_user_agent=get_settings().sec_user_agent,
+        )
+        beneish_evidence = sustained_beneish_evidence(facts)
 
         leverage_ratio = (liabilities / assets) if liabilities is not None and assets not in (None, 0) else None
         profitability_ratio = (net_income / revenue) if net_income is not None and revenue not in (None, 0) else None
@@ -1642,6 +1653,8 @@ class ContinuousResearchMachine:
         report.source_versions = {
             "report_machine": "V2_CONTINUOUS_MACHINE",
             "annual_flows": FORMULA_VERSION,
+            "duration_ratio_alignment": "ANNUAL_PERIOD_ALIGNMENT_V1",
+            "grading": ReportCardGradingEngine.RULE_VERSION,
             "classification": research.rule_version,
             "data_quality": quality.assessment_version,
             "factors": factor_pack.factor_version,
@@ -1828,9 +1841,10 @@ class ContinuousResearchMachine:
                 "auditor_tenure_years": event_signal_bundle.auditor_tenure_years,
                 "auditor_changed_flag": event_signal_bundle.auditor_changed_flag,
                 "auditor_change_date": event_signal_bundle.auditor_change_date,
-                "going_concern_flag": False,
+                "going_concern_flag": disclosure_evidence.going_concern,
                 "material_weakness_flag": False,
-                "restatement_severity": "little-r" if latest_filing_row and latest_filing_row.is_amendment else "none",
+                "restatement_severity": "Big-R" if disclosure_evidence.big_r_restatement else "unknown" if disclosure_evidence.big_r_restatement is None else "none",
+                "disclosure_evidence": disclosure_evidence.provenance(),
                 "late_filer_flag": False,
                 "sec_comment_letter_flag": event_signal_bundle.sec_comment_letter_flag,
                 "cfo_turnover_flag": event_signal_bundle.cfo_turnover_flag,
@@ -1908,7 +1922,7 @@ class ContinuousResearchMachine:
                 beneish_severity=_beneish_severity(factor_pack.beneish_m_score),
                 dechow_severity=None,
                 altman_distress_severity=_altman_severity(factor_pack.altman_z_score),
-                event_flag_severity=95.0 if latest_filing_row and latest_filing_row.is_amendment else 0.0,
+                event_flag_severity=disclosure_evidence.event_severity,
                 forecasted_next_q_pqc=_forecasted_next_q_pqc(
                     current_pqc=factor_pack.factor_quality_score,
                     revenue_forecast_next_year_pct=revenue_forecast_next_year_pct,
@@ -1924,9 +1938,9 @@ class ContinuousResearchMachine:
                 recency_factor=1.0,
                 required_sections=len(section_payloads),
                 populated_sections=_populated_sections(section_payloads),
-                sustained_beneish_breach=bool(factor_pack.beneish_m_score is not None and factor_pack.beneish_m_score > -1.78),
-                going_concern_flag=False,
-                big_r_restatement_flag=False,
+                sustained_beneish_breach=beneish_evidence["sustained"],
+                going_concern_flag=disclosure_evidence.going_concern is True,
+                big_r_restatement_flag=disclosure_evidence.big_r_restatement is True,
                 unscheduled_auditor_change_flag=event_signal_bundle.auditor_changed_flag,
                 base_unit=1.0,
                 sector_cap_remaining=1.0,
@@ -1944,6 +1958,7 @@ class ContinuousResearchMachine:
         universe_tradability = section_payloads["universe_tradability"]
         final_verdict = {
             "schema_version": "report_card_v2",
+            "grading_rule_version": ReportCardGradingEngine.RULE_VERSION,
             "pipeline_run_id": f"{company.cik}:{latest_filing_row.accession_number}" if latest_filing_row else company.cik,
             "current_action": grading.action,
             "route_family": route.family,
@@ -1989,7 +2004,9 @@ class ContinuousResearchMachine:
                 "red_flag_penalty_source": {
                     "beneish_severity": _maybe_round(_beneish_severity(factor_pack.beneish_m_score)),
                     "altman_severity": _maybe_round(_altman_severity(factor_pack.altman_z_score)),
-                    "event_flag_severity": 95.0 if latest_filing_row and latest_filing_row.is_amendment else 0.0,
+                    "event_flag_severity": disclosure_evidence.event_severity,
+                    "disclosure_evidence": disclosure_evidence.provenance(),
+                    "sustained_beneish_evidence": beneish_evidence,
                     "applied_penalty": _maybe_round(grading.red_flag_penalty),
                 },
                 "forecast_adjustment_source": {
@@ -2002,6 +2019,11 @@ class ContinuousResearchMachine:
                     "applied_adjustment": _maybe_round(grading.forecast_adjustment),
                 },
                 "confidence_inputs": {
+                    "forensic_completeness_rule": "FORENSIC_COMPLETENESS_V1",
+                    "forensic_inputs_present": sum(value is not None for value in (
+                        _beneish_severity(factor_pack.beneish_m_score), None,
+                        _altman_severity(factor_pack.altman_z_score), disclosure_evidence.event_severity)),
+                    "forensic_inputs_required": 4,
                     "data_completeness_pct": _maybe_round(quality.overall_coverage_pct),
                     "required_sections": len(section_payloads),
                     "populated_sections": _populated_sections(section_payloads),
@@ -2457,9 +2479,9 @@ def _percentile_proxy(value: float, *, scale: float, baseline: float) -> float:
     return _clamp(baseline + (value * scale), 0.0, 100.0)
 
 
-def _beneish_severity(beneish_m_score: float | None) -> float:
+def _beneish_severity(beneish_m_score: float | None) -> float | None:
     if beneish_m_score is None:
-        return 0.0
+        return None
     if beneish_m_score > -1.78:
         return 95.0
     if beneish_m_score > -2.22:
@@ -2467,9 +2489,9 @@ def _beneish_severity(beneish_m_score: float | None) -> float:
     return 20.0
 
 
-def _altman_severity(altman_z_score: float | None) -> float:
+def _altman_severity(altman_z_score: float | None) -> float | None:
     if altman_z_score is None:
-        return 20.0
+        return None
     if altman_z_score < 1.1:
         return 95.0
     if altman_z_score < 2.6:
@@ -2482,10 +2504,8 @@ def _forensic_dispersion(
     altman_z_score: float | None,
     factor_forensic_risk_score: float | None,
 ) -> float:
-    severities = [
-        _beneish_severity(beneish_m_score) / 100.0,
-        _altman_severity(altman_z_score) / 100.0,
-    ]
+    severities = [value / 100.0 for value in (
+        _beneish_severity(beneish_m_score), _altman_severity(altman_z_score)) if value is not None]
     if factor_forensic_risk_score is not None:
         severities.append(_clamp(factor_forensic_risk_score / 100.0, 0.0, 1.0))
     if len(severities) < 2:
