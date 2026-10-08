@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
 from accountant.db.models import Company, CompanyReport, Security
+from accountant.ops.storage_gate import StorageGate
 from accountant.research.report_machine import MACHINE
 
 
@@ -56,6 +57,7 @@ def main() -> None:
     queue = deque(rows)
     queue_lock = threading.Lock()
     counter_lock = threading.Lock()
+    storage_gate = StorageGate.from_settings(engine)
 
     def _worker(worker_id: int) -> None:
         nonlocal processed, errors
@@ -65,7 +67,13 @@ def main() -> None:
                     return
                 company_id, ticker = queue.popleft()
             session = factory()
+            admitted = False
             try:
+                if not storage_gate.claim():
+                    with counter_lock:
+                        errors += 1
+                    return
+                admitted = True
                 company = session.get(Company, company_id)
                 if company is None:
                     with counter_lock:
@@ -96,6 +104,8 @@ def main() -> None:
                 )
             finally:
                 session.close()
+                if admitted:
+                    storage_gate.release()
 
     threads = [
         threading.Thread(target=_worker, args=(index + 1,), daemon=True, name=f"refresh-report-worker-{index + 1}")

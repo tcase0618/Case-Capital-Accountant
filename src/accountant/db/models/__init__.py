@@ -14,6 +14,7 @@ from accountant.db.models.paper_book_position import PaperBookPosition
 from accountant.db.models.raw_fact import RawFact
 from accountant.db.models.report_card import ReportCard
 from accountant.db.models.research_record import ResearchRecord
+from accountant.db.models.sec_index_checkpoint import SecIndexCheckpoint
 from accountant.db.models.security import Security
 from accountant.db.models.statement_snapshot import StatementLine, StatementSnapshot
 
@@ -35,6 +36,7 @@ __all__ = [
     "ReportCard",
     "ResearchRecord",
     "Security",
+    "SecIndexCheckpoint",
     "StatementSnapshot",
     "StatementLine",
 ]

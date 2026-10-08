@@ -5,20 +5,19 @@ import threading
 from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
 
-import httpx
 from sqlalchemy import func, select
 
 from accountant.config import get_settings
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
-from accountant.db.models import Company, Filing, Security
+from accountant.db.models import Company, Filing, SecIndexCheckpoint, Security
 from accountant.ingest.filings import FilingFetchPayload, ingest_company_filings_payload
+from accountant.ops.storage_gate import StorageGate
 from accountant.sec import SecClient
+from accountant.sec.exceptions import SecHttpError
+from accountant.sec.forms import CORE_REPORT_FORMS
 from accountant.sec.rate_limit import RateLimiter
 
-
-CORE_REPORT_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A", "6-K", "6-K/A"}
 USEFUL_FORMS = CORE_REPORT_FORMS | {
     "8-K",
     "8-K/A",
@@ -75,7 +74,7 @@ def main() -> None:
     factory = create_session_factory(engine)
     settings = get_settings()
     today = date.today()
-    from_date = _parse_date_arg(args.from_date) or _next_day_after_latest_filing(factory)
+    from_date = _parse_date_arg(args.from_date) or _next_index_date(factory, today)
     to_date = _parse_date_arg(args.to_date) or today
     if from_date > to_date:
         print(f"no import needed from_date={from_date.isoformat()} to_date={to_date.isoformat()}", flush=True)
@@ -83,7 +82,10 @@ def main() -> None:
 
     universe = _load_universe(factory)
     forms = _selected_forms(args.forms)
-    matched = _load_matching_daily_index_filings(from_date, to_date, universe, forms=forms)
+    fetched_days: list[date] = []
+    matched = _load_matching_daily_index_filings(
+        from_date, to_date, universe, forms=forms, factory=factory, fetched_days=fetched_days,
+    )
     affected_ciks = sorted({row.cik for row in matched})
     if args.limit:
         affected_ciks = affected_ciks[: max(0, args.limit)]
@@ -106,6 +108,14 @@ def main() -> None:
         min_interval_seconds=settings.sec_min_interval_seconds,
     )
     _print_summary(factory, counters, matched)
+    # Never advance completion for partial/failed company imports or a narrower
+    # form selection. A crash after commits merely causes an idempotent replay.
+    if not counters.errors and not args.limit and args.forms in {"useful", "all"}:
+        with factory() as session:
+            for day in fetched_days:
+                checkpoint = session.get(SecIndexCheckpoint, day)
+                checkpoint.status = "completed"
+            session.commit()
     engine.dispose()
 
 
@@ -130,13 +140,23 @@ def _parse_date_arg(value: str | None) -> date | None:
     return date.fromisoformat(value)
 
 
-def _next_day_after_latest_filing(factory) -> date:
+def _next_index_date(factory, today: date) -> date:
     session = factory()
     try:
-        latest = session.execute(select(func.max(Filing.filing_date))).scalar_one_or_none()
-        if latest is None:
-            return date.today() - timedelta(days=30)
-        return latest + timedelta(days=1)
+        latest = session.execute(select(func.max(SecIndexCheckpoint.index_date)).where(
+            SecIndexCheckpoint.status == "completed",
+        )).scalar_one_or_none()
+        pending = session.execute(select(func.min(SecIndexCheckpoint.index_date)).where(
+            SecIndexCheckpoint.status != "completed",
+        )).scalar_one_or_none()
+        start = latest or today - timedelta(days=30)
+        # Always replay three business days, even if another writer has inserted
+        # a future-dated filing or yesterday's master index was incomplete.
+        business_days = 0
+        while business_days < 3:
+            start -= timedelta(days=1)
+            business_days += start.weekday() < 5
+        return min(start, pending) if pending else start
     finally:
         session.close()
 
@@ -173,34 +193,50 @@ def _load_matching_daily_index_filings(
     universe: dict[str, dict[str, str]],
     *,
     forms: set[str] | None,
+    factory=None,
+    fetched_days: list[date] | None = None,
 ) -> list[IndexFiling]:
     settings = get_settings()
-    headers = {
-        "User-Agent": settings.sec_user_agent,
-        "Accept-Encoding": "gzip, deflate",
-        "Accept": "text/plain,*/*",
-    }
     rows: list[IndexFiling] = []
-    with httpx.Client(timeout=httpx.Timeout(settings.sec_timeout_seconds), headers=headers, follow_redirects=True) as client:
+    with SecClient(settings=settings) as client:
         current = from_date
         while current <= to_date:
-            url = _daily_master_url(current)
-            try:
-                response = client.get(url)
-                if response.status_code in {403, 404}:
-                    current += timedelta(days=1)
-                    continue
-                response.raise_for_status()
-            except httpx.HTTPError as exc:
-                print(f"daily-index skip date={current.isoformat()} error={str(exc)[:160]}", flush=True)
+            if current.weekday() >= 5:
                 current += timedelta(days=1)
                 continue
-            for row in _parse_master_idx(response.text):
+            if factory is not None:
+                with factory() as session:
+                    checkpoint = session.get(SecIndexCheckpoint, current)
+                    if checkpoint is None:
+                        checkpoint = SecIndexCheckpoint(index_date=current)
+                        session.add(checkpoint)
+                    checkpoint.status = "pending"
+                    session.commit()
+            url = _daily_master_url(current)
+            try:
+                index_text = client.get_text(url)
+                if "CIK|Company Name|Form Type|Date Filed|Filename" not in index_text:
+                    raise ValueError("daily index is missing the master header")
+            except (SecHttpError, ValueError) as exc:
+                print(f"daily-index pending date={current.isoformat()} error={type(exc).__name__}", flush=True)
+                current += timedelta(days=1)
+                continue
+            day_rows = []
+            for row in _parse_master_idx(index_text):
                 if row.cik not in universe:
                     continue
                 if forms is not None and row.form_type not in forms:
                     continue
-                rows.append(row)
+                day_rows.append(row)
+            rows.extend(day_rows)
+            if factory is not None:
+                with factory() as session:
+                    checkpoint = session.get(SecIndexCheckpoint, current)
+                    checkpoint.fetched_at = datetime.now(UTC)
+                    checkpoint.matched_rows = len(day_rows)
+                    session.commit()
+            if fetched_days is not None:
+                fetched_days.append(current)
             current += timedelta(days=1)
     return rows
 
@@ -249,7 +285,8 @@ def _import_affected_submissions(
     queue = deque(affected_ciks)
     queue_lock = threading.Lock()
     counter_lock = threading.Lock()
-    shared_limiter = RateLimiter(min_interval_seconds)
+    shared_limiter = RateLimiter(min_interval_seconds, state_path=get_settings().data_dir / "sec_rate_limit.sqlite3")
+    storage_gate = StorageGate.from_settings(factory.kw["bind"])
     total = len(affected_ciks)
 
     def _worker(worker_id: int) -> None:
@@ -262,7 +299,13 @@ def _import_affected_submissions(
                     cik = queue.popleft()
                 info = universe[cik]
                 session = factory()
+                admitted = False
                 try:
+                    if not storage_gate.claim():
+                        with counter_lock:
+                            counters.errors += 1
+                        return
+                    admitted = True
                     submissions = sec_client.get_submissions(cik)
                     payload = FilingFetchPayload(
                         resolution_ticker=info["ticker"],
@@ -298,6 +341,8 @@ def _import_affected_submissions(
                     )
                 finally:
                     session.close()
+                    if admitted:
+                        storage_gate.release()
 
     threads = [
         threading.Thread(target=_worker, args=(index + 1,), daemon=True, name=f"stale-sec-import-{index + 1}")

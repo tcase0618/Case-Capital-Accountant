@@ -36,6 +36,7 @@ class Company(Base):
     ein: Mapped[str | None] = mapped_column(String(16), nullable=True)
     fiscal_year_end: Mapped[str | None] = mapped_column(String(8), nullable=True)
     state_of_incorporation: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    filings_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

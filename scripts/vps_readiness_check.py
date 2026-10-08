@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from typing import Any
 
 import httpx
@@ -27,9 +26,11 @@ def main() -> int:
     _expect(checks, "machine_running", bool(reports.get("running")), reports)
     _expect(checks, "reports_cached", int(reports.get("reports_cached") or 0) > 0, reports)
     _expect(checks, "no_report_loop_error", not reports.get("last_error"), reports.get("last_error"))
+    _expect(checks, "storage_not_blocked", not reports.get("storage_blocked"), reports.get("storage_block_reason"))
     _expect(checks, "source_integrity_not_failed", source.get("source_grade") in {"STRONG", "WATCH"}, source)
     sec = source.get("sec") or {}
-    staleness = int(sec.get("days_since_latest_filing") or 999)
+    staleness_value = sec.get("days_since_latest_filing")
+    staleness = int(staleness_value) if staleness_value is not None else 999
     _expect(checks, "sec_fresh_enough", staleness <= args.max_sec_staleness_days, sec)
     coverage = source.get("coverage") or {}
     _expect(checks, "report_coverage_100", float(coverage.get("report_coverage_pct") or 0.0) >= 99.0, coverage)

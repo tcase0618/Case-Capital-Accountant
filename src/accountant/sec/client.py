@@ -16,7 +16,7 @@ from accountant.sec.rate_limit import RateLimiter
 
 log = get_logger(__name__)
 
-_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+_RETRYABLE_STATUS = {403, 408, 429, 500, 502, 503, 504}
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ class SecClient:
             if min_interval_seconds is not None
             else settings.sec_min_interval_seconds
         )
-        self._limiter = RateLimiter(interval)
+        self._limiter = RateLimiter(interval, state_path=settings.data_dir / "sec_rate_limit.sqlite3")
         self._owns_client = http_client is None
         self._http = http_client or httpx.Client(
             timeout=httpx.Timeout(self._timeout),
@@ -171,7 +171,24 @@ class SecClient:
         log.info("sec.ticker_map_loaded", count=len(mapping))
         return mapping
 
+    def get_text(self, url: str) -> str:
+        """Fetch SEC text through the same limiter and retry policy as JSON."""
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        allowed = {urlsplit(self._base_www).netloc, urlsplit(self._base_data).netloc}
+        if parsed.scheme != "https" or parsed.netloc not in allowed:
+            raise SecHttpError(400, url, "refusing non-SEC document URL")
+        return self._get_response(url).text
+
     def _get_json(self, url: str) -> Any:
+        response = self._get_response(url)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise SecHttpError(response.status_code, url, "response is not valid JSON") from exc
+
+    def _get_response(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
         attempts = max(1, self._max_retries)
         for attempt in range(1, attempts + 1):
@@ -205,10 +222,7 @@ class SecClient:
                     raise last_error
                 if response.status_code >= 400:
                     raise SecHttpError(response.status_code, url, response.text[:500])
-                try:
-                    return response.json()
-                except ValueError as exc:
-                    raise SecHttpError(response.status_code, url, "response is not valid JSON") from exc
+                return response
             except (httpx.TransportError, httpx.TimeoutException) as exc:
                 last_error = SecRetryableError(0, url, str(exc))
                 if attempt < attempts:

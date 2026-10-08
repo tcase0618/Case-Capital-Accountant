@@ -6,11 +6,12 @@ import contextlib
 import hashlib
 import uuid
 from dataclasses import dataclass
+from datetime import UTC
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from accountant.db.models import Company, RawFact
+from accountant.db.models import Company, Filing, RawFact
 from accountant.ingest.dates import parse_date
 from accountant.logging import get_logger
 from accountant.sec.companyfacts import CompanyFactsClient
@@ -178,6 +179,18 @@ def ingest_company_facts_payload(
     facts_skipped = 0
     errors: list[str] = []
     seen_fact_hashes: set[str] = set()
+    filing_times = {
+        filing.accession_number: filing.accepted_at for filing in
+        session.query(Filing).filter(Filing.company_id == company.id).all()
+    }
+
+    def reported_key(fact):
+        accepted = filing_times.get(fact.get("accn"))
+        if accepted is not None:
+            if accepted.tzinfo is None:
+                accepted = accepted.replace(tzinfo=UTC)
+            return accepted.astimezone(UTC).isoformat()
+        return str(fact.get("filed") or "")
 
     facts_root = facts_data.get("facts", facts_data)
     for taxonomy, concepts in facts_root.items():
@@ -200,7 +213,7 @@ def ingest_company_facts_payload(
                 if not isinstance(facts_list, list):
                     continue
 
-                for fact in facts_list:
+                for fact in sorted(facts_list, key=reported_key):
                     try:
                         inserted = _ingest_single_fact(
                             session=session,
@@ -224,6 +237,8 @@ def ingest_company_facts_payload(
                             f"unit={unit}): {str(e)[:100]}"
                         )
 
+    if errors:
+        log.warning("companyfacts.payload_errors", cik=cik, error_count=len(errors))
     return concepts_processed, facts_inserted, facts_skipped, errors
 
 
@@ -361,9 +376,16 @@ def _ingest_single_fact(
     )
     prior_version = None
     if filing_id:
-        prior_version = (
+        prior_query = (
             session.query(RawFact)
             .filter(RawFact.company_id == company_uuid, RawFact.lineage_hash == lineage_hash)
+        )
+        if accepted_at is not None:
+            prior_query = prior_query.filter(RawFact.accepted_at <= accepted_at)
+        elif filed_date is not None:
+            prior_query = prior_query.filter(RawFact.filed_date <= filed_date)
+        prior_version = (
+            prior_query
             .order_by(
                 RawFact.accepted_at.desc().nullslast(),
                 RawFact.filed_date.desc().nullslast(),
@@ -421,8 +443,7 @@ def _ingest_single_fact(
         session.flush()
         return True
     else:
-        # Skip fact without a linked filing for now
-        return False
+        raise ValueError(f"missing filing provenance for accession {accession or 'unavailable'}")
 
 
 def query_facts(

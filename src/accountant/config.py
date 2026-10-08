@@ -70,7 +70,7 @@ class Settings(BaseSettings):
 
     sec_base_www: str = Field(default="https://www.sec.gov")
     sec_base_data: str = Field(default="https://data.sec.gov")
-    sec_min_interval_seconds: float = Field(default=0.12)
+    sec_min_interval_seconds: float = Field(default=0.12, ge=0.1)
     sec_max_retries: int = Field(default=4)
     sec_timeout_seconds: float = Field(default=30.0)
     sec_backoff_min_seconds: float = Field(default=0.5)
@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     @classmethod
     def _upper_log_level(cls, value: str) -> str:
         return value.upper()
+
+    @field_validator("accountant_env")
+    @classmethod
+    def _validate_environment(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"development", "test", "production"}:
+            raise ValueError("ACCOUNTANT_ENV must be development, test, or production")
+        return normalized
 
     @field_validator("market_data_mode")
     @classmethod
