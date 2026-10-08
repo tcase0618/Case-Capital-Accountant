@@ -39,10 +39,11 @@ from accountant.ingest.filings import (
 from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
 from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
+from accountant.ops.storage_gate import StorageGate
+from accountant.research.annual_flows import FORMULA_VERSION, annual_flow
 from accountant.research.bottleneck_engine import upsert_company_bottleneck_snapshot
 from accountant.research.buy_board import (
     _estimate_cc_valuation,
-    _estimate_share_count,
     sync_buy_board_candidate,
 )
 from accountant.research.classification_engine import FundamentalResearchClassificationEngine
@@ -62,6 +63,7 @@ from accountant.research.universe_signal_engine import membership_for_ticker
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
 from accountant.sec.exceptions import SecHttpError
+from accountant.sec.forms import REPORT_CARD_FORMS
 from accountant.universe import load_universe_tickers
 
 log = get_logger(__name__)
@@ -78,10 +80,7 @@ _NON_OPERATING_NAME_MARKERS = (
 # Full report-card scoring belongs to financial statements and explicitly
 # material SEC events. Ownership forms remain available as source evidence but
 # must not replace a company's latest accounting report.
-_REPORT_CARD_FILING_TYPES = {
-    "10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A", "6-K",
-    "8-K", "8-K/A", "NT 10-K", "NT 10-Q", "UPLOAD", "CORRESP",
-}
+_REPORT_CARD_FILING_TYPES = REPORT_CARD_FORMS
 
 _BASE_WORKER_ROLES: list[dict[str, Any]] = [
     {
@@ -165,6 +164,9 @@ class ContinuousResearchMachine:
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._snapshot = MachineSnapshot()
+        self._error_generation = 0
+        self._clean_cycles = 0
+        self._storage_gate: StorageGate | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -198,8 +200,8 @@ class ContinuousResearchMachine:
                 "started_at": self._snapshot.started_at,
                 "last_cycle_at": self._snapshot.last_cycle_at,
                 "last_action": self._snapshot.last_action,
-                "last_error": self._snapshot.last_error,
-                "recent_errors": [dict(item) for item in self._snapshot.recent_errors],
+                "last_error": "research_worker_error" if self._snapshot.last_error else None,
+                "recent_errors": [{**item, "error": "research_worker_error"} for item in self._snapshot.recent_errors],
                 "total_companies": self._snapshot.total_companies,
                 "reports_cached": self._snapshot.reports_cached,
                 "processed_cycles": self._snapshot.processed_cycles,
@@ -288,6 +290,8 @@ class ContinuousResearchMachine:
         if ticker:
             event["ticker"] = ticker
         with self._lock:
+            self._error_generation += 1
+            self._clean_cycles = 0
             self._snapshot.last_error = error_text
             self._snapshot.recent_errors.append(event)
             self._snapshot.recent_errors = self._snapshot.recent_errors[-20:]
@@ -310,9 +314,12 @@ class ContinuousResearchMachine:
                 self._snapshot.running = False
 
     def _run_cycle(self) -> bool:
+        with self._lock:
+            error_generation = self._error_generation
         engine = create_db_engine()
         factory = create_session_factory(engine)
         try:
+            self._storage_gate = StorageGate.from_settings(engine)
             storage_decision = self._storage_preflight(engine)
             if not storage_decision.allowed:
                 with self._lock:
@@ -326,7 +333,13 @@ class ContinuousResearchMachine:
 
             session = factory()
             try:
-                self._sync_universes_if_needed(session)
+                if not self._storage_gate.claim():
+                    self._record_storage_block()
+                    return False
+                try:
+                    self._sync_universes_if_needed(session)
+                finally:
+                    self._storage_gate.release()
                 progress = self._refresh_progress_snapshot(session)
                 assignments = self._load_role_assignments(session)
             finally:
@@ -355,7 +368,10 @@ class ContinuousResearchMachine:
                 elif progress["runnable_companies"] == 0:
                     self._snapshot.last_action = "coverage queue drained"
                     self._snapshot.worker_states = self._blank_worker_states()
-                self._snapshot.last_error = None
+                if self._error_generation == error_generation:
+                    self._clean_cycles += 1
+                    if self._clean_cycles >= 3:
+                        self._snapshot.last_error = None
         finally:
             engine.dispose()
         return progress["runnable_companies"] > 0
@@ -381,9 +397,15 @@ class ContinuousResearchMachine:
             budget,
             database_bytes=database_bytes,
             disk_free_bytes=disk_free_bytes,
-            cycle_start_database_bytes=database_bytes,
+            cycle_start_database_bytes=self._storage_gate._start_database_bytes if self._storage_gate else database_bytes,
             reserved_bytes=reserved_bytes,
         )
+
+    def _record_storage_block(self) -> None:
+        with self._lock:
+            self._snapshot.storage_blocked = True
+            self._snapshot.storage_block_reason = self._storage_gate.stop_reason if self._storage_gate else "storage_gate_unavailable"
+            self._snapshot.last_action = f"storage gate blocked: {self._snapshot.storage_block_reason}"
 
     def _sync_universes_if_needed(self, session: Session) -> None:
         settings = get_settings()
@@ -474,6 +496,7 @@ class ContinuousResearchMachine:
                 Security.ticker.label("ticker"),
                 Company.name.label("company_name"),
                 Company.entity_type.label("entity_type"),
+                Company.filings_checked_at.label("filings_checked_at"),
                 Security.security_type.label("security_type"),
                 CompanyReport.id.label("report_id"),
                 CompanyReport.pipeline_stage.label("pipeline_stage"),
@@ -563,7 +586,14 @@ class ContinuousResearchMachine:
                 last_action=f"{lane} {ticker}",
             )
             session = factory()
+            admitted = False
             try:
+                if self._storage_gate is not None:
+                    if not self._storage_gate.claim():
+                        self._record_storage_block()
+                        self._set_worker_state(worker_index, role=role, status="standby", last_action="storage gate blocked")
+                        return
+                    admitted = True
                 company = session.get(Company, company_id)
                 if company is None:
                     self._set_worker_state(
@@ -641,8 +671,16 @@ class ContinuousResearchMachine:
                         last_action=f"standby {lane}",
                         last_completed_ticker=ticker,
                     )
+            except Exception as exc:
+                session.rollback()
+                self._record_error(exc, worker_index=worker_index, role=role, ticker=ticker)
+                log.error("machine.worker_admission_failed", ticker=ticker, exc_info=True)
             finally:
-                session.close()
+                try:
+                    session.close()
+                finally:
+                    if admitted:
+                        self._storage_gate.release()
 
         threads = [
             threading.Thread(
@@ -696,17 +734,22 @@ class ContinuousResearchMachine:
         self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"refreshing filings {ticker}")
         try:
             with SecClient() as sec_client:
-                filing_payload = fetch_company_filings_payload(sec_client, ticker)
+                filing_payload = fetch_company_filings_payload(
+                    sec_client, ticker, include_historical_files=_count(session, Filing, company.id) == 0,
+                )
             with sqlite_write_guard():
                 ingest_company_filings_payload(session, filing_payload)
+                company.filings_checked_at = datetime.now(UTC)
                 session.commit()
             return True
         except TickerNotFoundError as exc:
             session.rollback()
             log.warning("machine.ticker_unresolved", ticker=ticker, error=_safe_error_text(exc))
+            raise
         except Exception as exc:
             session.rollback()
             log.warning("machine.filing_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+            raise
         return False
 
     def _refresh_companyfacts(
@@ -727,7 +770,9 @@ class ContinuousResearchMachine:
             try:
                 facts_data = companyfacts_client.get_company_facts(company.cik)
                 with sqlite_write_guard():
-                    ingest_company_facts_payload(session, company, facts_data)
+                    _, _, _, payload_errors = ingest_company_facts_payload(session, company, facts_data)
+                    if payload_errors:
+                        raise RuntimeError(f"CompanyFacts ingestion has {len(payload_errors)} provenance/payload errors")
                     session.commit()
                 return True
             except SecHttpError as exc:
@@ -741,14 +786,18 @@ class ContinuousResearchMachine:
                     except Exception as build_exc:
                         session.rollback()
                         log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(build_exc)[:300])
+                        raise
                 else:
                     log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+                    raise
             except TickerNotFoundError as exc:
                 session.rollback()
                 log.warning("machine.ticker_unresolved", ticker=ticker, error=_safe_error_text(exc))
+                raise
             except Exception as exc:
                 session.rollback()
                 log.warning("machine.companyfacts_ingest_failed", ticker=ticker, error=_safe_error_text(exc)[:300])
+                raise
             finally:
                 companyfacts_client.close()
         return False
@@ -787,6 +836,7 @@ class ContinuousResearchMachine:
         except Exception as exc:
             session.rollback()
             log.warning("machine.normalize_skipped", ticker=ticker, error=str(exc)[:300])
+            raise
         return False
 
     def _build_statements_lane(
@@ -812,6 +862,7 @@ class ContinuousResearchMachine:
         except Exception as exc:
             session.rollback()
             log.warning("machine.statement_snapshot_build_failed", ticker=ticker, error=str(exc)[:300])
+            raise
         return False
 
     def _build_report_lane(
@@ -839,6 +890,7 @@ class ContinuousResearchMachine:
                 except Exception as exc:
                     session.rollback()
                     log.warning("machine.partial_report_build_failed", ticker=ticker, error=str(exc)[:300])
+                    raise
             return False
         self._mark_progress(f"building report {ticker}")
         self._set_worker_state(worker_index, role=role, ticker=ticker, status="processing", last_action=f"building report {ticker}")
@@ -850,6 +902,7 @@ class ContinuousResearchMachine:
         except Exception as exc:
             session.rollback()
             log.warning("machine.report_build_failed", ticker=ticker, error=str(exc)[:300])
+            raise
         return False
 
     def _refresh_strategy_lane(
@@ -874,6 +927,7 @@ class ContinuousResearchMachine:
         except Exception as exc:
             session.rollback()
             log.warning("machine.strategy_refresh_failed", ticker=ticker, error=str(exc)[:300])
+            raise
         return False
 
     def _process_company(self, session: Session, company: Company, ticker: str, worker_index: int) -> None:
@@ -1238,42 +1292,12 @@ class ContinuousResearchMachine:
             sec_user_agent=get_settings().sec_user_agent,
         )
 
-        revenue_quarterly_series = _series(
-            facts,
-            [
-                "RevenueFromContractWithCustomerExcludingAssessedTax",
-                "Revenues",
-                "SalesRevenueNet",
-            ],
-            period="quarterly",
-        )
-        revenue_annual_series = _series(
-            facts,
-            [
-                "RevenueFromContractWithCustomerExcludingAssessedTax",
-                "Revenues",
-                "SalesRevenueNet",
-            ],
-            period="annual",
-        )
-        net_income_quarterly_series = _series(facts, ["NetIncomeLoss"], period="quarterly")
-        net_income_annual_series = _series(facts, ["NetIncomeLoss"], period="annual")
         assets_series = _series(facts, ["Assets"], period="instant")
         liabilities_series = _series(facts, ["Liabilities"], period="instant")
         equity_series = _series(
             facts,
             ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
             period="instant",
-        )
-        ocf_quarterly_series = _series(
-            facts,
-            ["NetCashProvidedByUsedInOperatingActivities"],
-            period="quarterly",
-        )
-        ocf_annual_series = _series(
-            facts,
-            ["NetCashProvidedByUsedInOperatingActivities"],
-            period="annual",
         )
         capex_quarterly_series = _series(
             facts,
@@ -1286,31 +1310,35 @@ class ContinuousResearchMachine:
             period="annual",
         )
 
-        revenue = _first_value(revenue_quarterly_series) or _first_value(revenue_annual_series)
-        prior_revenue = _comparable_prior_value(revenue_quarterly_series) or _comparable_prior_value(revenue_annual_series)
-        net_income = _first_value(net_income_quarterly_series) or _first_value(net_income_annual_series)
+        revenue_concepts = ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"]
+        revenue_flow = annual_flow(facts, revenue_concepts)
+        prior_revenue_flow = annual_flow(facts, revenue_concepts, as_of=revenue_flow.end - timedelta(days=350)) if revenue_flow else None
+        income_flow = annual_flow(facts, ["NetIncomeLoss"])
+        ocf_flow = annual_flow(facts, ["NetCashProvidedByUsedInOperatingActivities"])
+        capex_flow = annual_flow(facts, ["PaymentsToAcquirePropertyPlantAndEquipment"])
+        share_flow = annual_flow(facts, ["WeightedAverageNumberOfDilutedSharesOutstanding",
+                                        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted"], weighted_shares=True)
+        revenue = revenue_flow.value if revenue_flow else None
+        prior_revenue = prior_revenue_flow.value if prior_revenue_flow else None
+        net_income = income_flow.value if income_flow else None
         assets = _first_value(assets_series)
         liabilities = _first_value(liabilities_series)
         equity = _first_value(equity_series)
-        ocf = _first_value(ocf_quarterly_series) or _first_value(ocf_annual_series)
-        capex = _first_value(capex_quarterly_series) or _first_value(capex_annual_series)
-        diluted_shares = _latest_fact_from_concepts(
-            facts,
-            [
-                "WeightedAverageNumberOfDilutedSharesOutstanding",
-                "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-                "WeightedAverageNumberOfSharesOutstandingBasic",
-                "CommonStockSharesOutstanding",
-            ],
-            period="instant",
+        ocf = ocf_flow.value if ocf_flow else None
+        capex = capex_flow.value if capex_flow else None
+        diluted_shares = share_flow.value if share_flow and income_flow and (share_flow.start, share_flow.end) == (income_flow.start, income_flow.end) else None
+        shares_outstanding = _latest_fact_from_concepts(
+            facts, ["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"], period="instant",
         )
 
         revenue_growth_pct = _pct_change(revenue, prior_revenue)
         owner_earnings = None
-        if ocf is not None and capex is not None:
+        if ocf_flow and capex_flow and (ocf_flow.start, ocf_flow.end) == (capex_flow.start, capex_flow.end):
             owner_earnings = ocf - abs(capex)
-        gross_profit = _latest_fact_from_concepts(facts, ["GrossProfit"])
-        cogs = _latest_fact_from_concepts(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
+        gross_flow = annual_flow(facts, ["GrossProfit"])
+        cogs_flow = annual_flow(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
+        gross_profit = gross_flow.value if gross_flow else None
+        cogs = cogs_flow.value if cogs_flow else None
         if gross_profit is None and revenue is not None and cogs is not None:
             gross_profit = revenue - cogs
         gross_margin_pct = _ratio_pct(gross_profit, revenue, ceiling=1000.0)
@@ -1319,19 +1347,15 @@ class ContinuousResearchMachine:
         if owner_earnings_margin_pct is not None:
             owner_earnings_margin_pct *= 100
         dilution_growth_pct = None
-        if diluted_shares is not None:
-            share_series = _series(
+        if diluted_shares is not None and share_flow is not None:
+            prior_share_flow = annual_flow(
                 facts,
-                [
-                    "WeightedAverageNumberOfDilutedSharesOutstanding",
-                    "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-                    "WeightedAverageNumberOfSharesOutstandingBasic",
-                    "CommonStockSharesOutstanding",
-                ],
-                period="instant",
+                ["WeightedAverageNumberOfDilutedSharesOutstanding",
+                 "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+                 "WeightedAverageNumberOfSharesOutstandingBasic"],
+                as_of=share_flow.end - timedelta(days=350), weighted_shares=True,
             )
-            prior_shares = _comparable_prior_value(share_series)
-            dilution_growth_pct = _pct_change(diluted_shares, prior_shares)
+            dilution_growth_pct = _pct_change(diluted_shares, prior_share_flow.value if prior_share_flow else None)
 
         metric_names = {
             "revenue": revenue,
@@ -1389,6 +1413,10 @@ class ContinuousResearchMachine:
             raw_facts_count=raw_facts_count,
             quality_score=accounting_quality_score,
         )
+        if any(value is None for value in (event_signal_bundle.auditor_changed_flag,
+                                          event_signal_bundle.cfo_turnover_flag,
+                                          event_signal_bundle.ceo_turnover_flag)):
+            forecast_confidence_pct = round(forecast_confidence_pct * 0.75, 2)
         revenue_forecast_next_year_pct = round(
             _clamp((revenue_growth_pct or 0.0) * 0.72 + max(0.0, accounting_quality_score - 60.0) * 0.12, -12.0, 28.0),
             2,
@@ -1416,14 +1444,14 @@ class ContinuousResearchMachine:
             latest_filing_row,
             prior_same_form_filings,
             sec_user_agent=get_settings().sec_user_agent,
-            gaap_eps=eps,
+            gaap_eps=_latest_fact_from_concepts(facts, ["EarningsPerShareDiluted"], period="quarterly"),
         )
         eps_forecast = round(eps * (1 + (revenue_forecast_next_year_pct / 100)), 2) if eps is not None else None
         scenario_valuations = _scenario_valuations(
             earnings_power=owner_earnings if owner_earnings and owner_earnings > 0 else net_income,
             quality_score=accounting_quality_score,
             growth_pct=revenue_forecast_next_year_pct,
-            share_count=diluted_shares,
+            share_count=shares_outstanding,
         )
         surprise_score = _expected_surprise_score(
             revenue_growth_pct=revenue_forecast_next_year_pct,
@@ -1526,7 +1554,7 @@ class ContinuousResearchMachine:
             report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=date.today().isoformat(), stance=stance)
             session.add(report)
         current_price = _resolved_current_price(ticker, fallback=_safe_float(report.current_price))
-        market_cap = (current_price * diluted_shares) if current_price is not None and diluted_shares is not None else None
+        market_cap = (current_price * shares_outstanding) if current_price is not None and shares_outstanding is not None else None
         route = route_company(
             gics_sector=gics_sector,
             sic_description=company.sic_description,
@@ -1560,6 +1588,15 @@ class ContinuousResearchMachine:
             "margin_pct": _maybe_round(net_margin_pct),
             "gross_margin_pct": _maybe_round(gross_margin_pct),
             "weighted_avg_diluted_shares": _maybe_round(diluted_shares),
+            "shares_outstanding": _maybe_round(shares_outstanding),
+            "annual_flow_version": FORMULA_VERSION,
+            "annual_flow_provenance": {
+                name: flow.provenance() if flow else None for name, flow in {
+                    "revenue": revenue_flow, "prior_revenue": prior_revenue_flow,
+                    "net_income": income_flow, "ocf": ocf_flow, "capex": capex_flow,
+                    "weighted_avg_diluted_shares": share_flow,
+                }.items()
+            },
             "dilution_growth_pct": _maybe_round(dilution_growth_pct),
             "factor_period_label": factor_pack.period_label,
             "factor_prior_period_label": factor_pack.prior_period_label,
@@ -1604,12 +1641,15 @@ class ContinuousResearchMachine:
         report.report_markdown = report_markdown
         report.source_versions = {
             "report_machine": "V2_CONTINUOUS_MACHINE",
+            "annual_flows": FORMULA_VERSION,
             "classification": research.rule_version,
             "data_quality": quality.assessment_version,
             "factors": factor_pack.factor_version,
             "accounting_ledger_overlay": "A_HIS_LEDGER_V1",
         }
         standardized_financials = {
+            "annual_flow_version": FORMULA_VERSION,
+            "annual_flow_provenance": report.key_stats["annual_flow_provenance"],
             "revenue": _maybe_round(revenue),
             "cogs": _maybe_round(cogs),
             "gross_profit": _maybe_round(gross_profit),
@@ -1833,7 +1873,7 @@ class ContinuousResearchMachine:
                 "ev": None,
                 "adv_20d": None,
                 "ev_ebitda": None,
-                "p_fcf": _maybe_round(_safe_divide(current_price, owner_earnings / diluted_shares) if current_price is not None and owner_earnings is not None and diluted_shares not in (None, 0) else None),
+                "p_fcf": _maybe_round(_safe_divide(current_price, owner_earnings / shares_outstanding) if current_price is not None and owner_earnings is not None and shares_outstanding is not None and shares_outstanding > 0 else None),
             },
             "universe_tradability": {
                 "in_sp500": membership.in_sp500,
@@ -1978,7 +2018,7 @@ class ContinuousResearchMachine:
         # Historical cards created before this version intentionally remain unfilled.
         cc_valuation = _estimate_cc_valuation(session, report)
         final_verdict["valuation_snapshot"] = {
-            "model_version": "CC_EARNINGS_POWER_V1",
+            "model_version": "CC_EARNINGS_POWER_V2_TTM",
             "cc_valuation": _maybe_round(cc_valuation),
             "market_price": _maybe_round(_safe_float(market_data_linkage.get("price_asof"))),
             "captured_at": datetime.now(UTC).isoformat(),
@@ -2280,7 +2320,6 @@ def _worker_role_specs(worker_count: int) -> list[dict[str, Any]]:
 
 
 def _lane_sort_key(lane: str, row: dict[str, Any]) -> tuple[Any, ...]:
-    filings_count = int(row.get("filings_count") or 0)
     raw_facts_count = int(row.get("raw_facts_count") or 0)
     canonical_count = int(row.get("canonical_count") or 0)
     statement_count = int(row.get("statement_count") or 0)
@@ -2291,7 +2330,10 @@ def _lane_sort_key(lane: str, row: dict[str, Any]) -> tuple[Any, ...]:
     ticker = str(row.get("ticker") or "")
 
     if lane == "filings":
-        return (0 if filings_count == 0 else 1, report_missing, updated_rank, ticker)
+        checked_at = row.get("filings_checked_at") or datetime(1970, 1, 1, tzinfo=UTC)
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=UTC)
+        return (checked_at, ticker)
     if lane == "companyfacts":
         return (0 if raw_facts_count == 0 else 1, updated_rank, ticker)
     if lane == "canonical":
@@ -2546,103 +2588,18 @@ def _future_bucket(
 
 def _enrich_report_forecast_fields(session: Session, report: CompanyReport) -> None:
     stats = dict(report.key_stats or {})
-    filings_count = int(stats.get("filings_count") or 0)
-    raw_facts_count = int(stats.get("raw_facts_count") or 0)
-    canonical_count = int(stats.get("canonical_facts_count") or 0)
-    quality_score = _safe_float(stats.get("accounting_quality_score")) or report.composite_score
-    revenue_growth_pct = _safe_float(stats.get("revenue_growth_pct")) or 0.0
-    owner_earnings = _safe_float(stats.get("owner_earnings"))
-    margin_pct = _safe_float(stats.get("margin_pct"))
-    assets = _safe_float(stats.get("assets"))
-    liabilities = _safe_float(stats.get("liabilities"))
-    diluted_shares = _safe_float(stats.get("weighted_avg_diluted_shares")) or _safe_float(stats.get("shares_outstanding"))
-    if diluted_shares in (None, 0):
-        diluted_shares = _estimate_share_count(session, report)
-    net_income = _safe_float(stats.get("net_income"))
-    leverage_ratio = _safe_divide(liabilities, assets)
-    balance_score = _clamp(100 - ((leverage_ratio or 0.5) * 100), 0, 100) if leverage_ratio is not None else 45.0
-    years_of_history = max(1, min(5, filings_count // 4)) if filings_count > 0 else 1
-
-    forecast_confidence_pct = _forecast_confidence(
-        filings_count=filings_count,
-        years_of_history=years_of_history,
-        canonical_count=canonical_count,
-        raw_facts_count=raw_facts_count,
-        quality_score=quality_score,
-    )
-    revenue_forecast_next_year_pct = round(
-        _clamp((revenue_growth_pct or 0.0) * 0.72 + max(0.0, quality_score - 60.0) * 0.12, -12.0, 28.0),
-        2,
-    )
-    revenue_forecast_next_quarter_pct = round(
-        _clamp((revenue_growth_pct or 0.0) * 0.45 + max(0.0, quality_score - 60.0) * 0.08, -8.0, 18.0),
-        2,
-    )
-    margin_forecast_pct = round(
-        _clamp((margin_pct or 6.0) + max(0.0, quality_score - 62.0) * 0.05, -5.0, 32.0),
-        2,
-    )
-    owner_earnings_forecast = round(
-        owner_earnings * (1 + (revenue_forecast_next_year_pct / 100)),
-        2,
-    ) if owner_earnings is not None else None
-    eps = _safe_float(stats.get("eps"))
-    if eps is None and net_income is not None and diluted_shares not in (None, 0):
-        eps = round(net_income / diluted_shares, 2)
-    eps_forecast = round(eps * (1 + (revenue_forecast_next_year_pct / 100)), 2) if eps is not None else None
-    scenario_valuations = _scenario_valuations(
-        earnings_power=owner_earnings if owner_earnings and owner_earnings > 0 else net_income,
-        quality_score=quality_score,
-        growth_pct=revenue_forecast_next_year_pct,
-        share_count=diluted_shares,
-    )
-    surprise_score = _expected_surprise_score(
-        revenue_growth_pct=revenue_forecast_next_year_pct,
-        owner_earnings=owner_earnings_forecast,
-        margin_pct=margin_forecast_pct,
-        confidence_pct=forecast_confidence_pct,
-        accounting_quality_score=quality_score,
-    )
-    designation_profile = _designation_profile(
-        revenue_growth_pct=revenue_forecast_next_year_pct,
-        owner_earnings=owner_earnings_forecast,
-        balance_score=balance_score,
-        accounting_quality_score=quality_score,
-        leverage_ratio=leverage_ratio,
-    )
-    surprise_upside_pct = None
-    if scenario_valuations["bull"] is not None and scenario_valuations["base"] not in (None, 0):
-        surprise_upside_pct = round(((scenario_valuations["bull"] - scenario_valuations["base"]) / scenario_valuations["base"]) * 100, 2)
-    future_bucket, future_reason = _future_bucket(
-        canonical_count=canonical_count,
-        surprise_score=surprise_score,
-        forecast_confidence_pct=forecast_confidence_pct,
-        revenue_forecast_next_year_pct=revenue_forecast_next_year_pct,
-    )
-
-    stats.update(
-        {
-            "eps": _maybe_round(eps),
-            "weighted_avg_diluted_shares": _maybe_round(diluted_shares),
-            "shares_outstanding": _maybe_round(diluted_shares),
-            "eps_forecast": _maybe_round(eps_forecast),
-            "revenue_forecast_next_quarter_pct": _maybe_round(revenue_forecast_next_quarter_pct),
-            "revenue_forecast_next_year_pct": _maybe_round(revenue_forecast_next_year_pct),
-            "margin_forecast_pct": _maybe_round(margin_forecast_pct),
-            "owner_earnings_forecast": _maybe_round(owner_earnings_forecast),
-            "forecast_confidence_pct": _maybe_round(forecast_confidence_pct),
-            "surprise_score": _maybe_round(surprise_score),
-            "surprise_upside_pct": _maybe_round(surprise_upside_pct),
-            "designation_profile": designation_profile,
-            "scenario_bear_value": _maybe_round(scenario_valuations["bear"]),
-            "scenario_base_value": _maybe_round(scenario_valuations["base"]),
-            "scenario_bull_value": _maybe_round(scenario_valuations["bull"]),
-            "future_bucket": future_bucket,
-            "future_reason": future_reason,
-        }
-    )
+    if stats.get("annual_flow_version") == FORMULA_VERSION:
+        # Preserve the validated annual inputs, distinct share bases, and the
+        # unknown-text confidence penalty established by the full build.
+        return
+    # Legacy reports lack annual-period provenance; require a full rebuild
+    # rather than deriving per-share targets from ambiguous stored flows.
+    stats.update({key: None for key in ("eps", "eps_forecast", "scenario_bear_value",
+                                       "scenario_base_value", "scenario_bull_value")})
+    stats["valuation_status"] = "requires_ttm_rebuild"
     report.key_stats = stats
     flag_modified(report, "key_stats")
+    return
 
 
 def backfill_report_forecast_fields(session: Session) -> dict[str, int]:
@@ -2704,13 +2661,13 @@ def _scenario_valuations(
     growth_pct: float | None,
     share_count: float | None = None,
 ) -> dict[str, float | None]:
-    if earnings_power is None or earnings_power <= 0:
+    if earnings_power is None or earnings_power <= 0 or share_count is None or share_count <= 0:
         return {"bear": None, "base": None, "bull": None}
     normalized_growth = max(-10.0, min(35.0, growth_pct or 0.0))
     bear_multiple = 6.0 + max(0.0, (quality_score - 55.0) / 18.0)
     base_multiple = 8.5 + max(0.0, (quality_score - 55.0) / 12.0) + max(0.0, normalized_growth / 22.0)
     bull_multiple = 11.0 + max(0.0, (quality_score - 55.0) / 9.0) + max(0.0, normalized_growth / 14.0)
-    divisor = share_count if share_count and share_count > 0 else 1.0
+    divisor = share_count
     return {
         "bear": round((earnings_power * bear_multiple) / divisor, 2),
         "base": round((earnings_power * base_multiple) / divisor, 2),

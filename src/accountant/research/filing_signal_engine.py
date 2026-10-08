@@ -9,9 +9,8 @@ from datetime import date, timedelta
 from functools import lru_cache
 from html import unescape
 
-import httpx
-
 from accountant.db.models import Filing
+from accountant.sec import SecClient
 
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b.*?</\1>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -83,12 +82,12 @@ class TextualSignalBundle:
 class EventSignalBundle:
     auditor_name: str | None
     auditor_tenure_years: float | None
-    auditor_changed_flag: bool
+    auditor_changed_flag: bool | None
     auditor_change_date: str | None
     sec_comment_letter_flag: bool
-    cfo_turnover_flag: bool
+    cfo_turnover_flag: bool | None
     cfo_turnover_date: str | None
-    ceo_turnover_flag: bool
+    ceo_turnover_flag: bool | None
     ceo_turnover_date: str | None
 
 
@@ -205,6 +204,7 @@ def build_event_red_flags(
     cfo_turnover_flag = False
     ceo_turnover_flag = False
     auditor_name: str | None = None
+    text_incomplete = False
 
     for filing in eight_ks:
         text = _filing_metadata_text(filing)
@@ -212,6 +212,10 @@ def build_event_red_flags(
             fetched = fetch(filing.source_url, sec_user_agent)
             if fetched:
                 text = f"{text} {fetched}"
+            else:
+                text_incomplete = True
+        else:
+            text_incomplete = True
         if not auditor_changed_flag and is_auditor_change_disclosure(text):
             auditor_changed_flag = True
             auditor_change_date = filing.filing_date.isoformat() if filing.filing_date else None
@@ -233,12 +237,12 @@ def build_event_red_flags(
     return EventSignalBundle(
         auditor_name=auditor_name,
         auditor_tenure_years=auditor_tenure_years,
-        auditor_changed_flag=auditor_changed_flag,
+        auditor_changed_flag=auditor_changed_flag or (None if text_incomplete else False),
         auditor_change_date=auditor_change_date,
         sec_comment_letter_flag=sec_comment_letter_flag,
-        cfo_turnover_flag=cfo_turnover_flag,
+        cfo_turnover_flag=cfo_turnover_flag or (None if text_incomplete else False),
         cfo_turnover_date=cfo_turnover_date,
-        ceo_turnover_flag=ceo_turnover_flag,
+        ceo_turnover_flag=ceo_turnover_flag or (None if text_incomplete else False),
         ceo_turnover_date=ceo_turnover_date,
     )
 
@@ -315,21 +319,20 @@ def build_non_gaap_signals(
     )
 
 
-@lru_cache(maxsize=512)
 def fetch_filing_text(url: str, sec_user_agent: str) -> str:
     if not url:
         return ""
     try:
-        with httpx.Client(
-            timeout=httpx.Timeout(10.0),
-            headers={"User-Agent": sec_user_agent, "Accept-Encoding": "gzip, deflate"},
-            follow_redirects=True,
-        ) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return strip_html_to_text(response.text)
+        return _fetch_filing_text_cached(url, sec_user_agent)
     except Exception:
         return ""
+
+
+@lru_cache(maxsize=512)
+def _fetch_filing_text_cached(url: str, sec_user_agent: str) -> str:
+    # lru_cache does not retain raised exceptions. A later call retries failures.
+    with SecClient(user_agent=sec_user_agent) as client:
+        return strip_html_to_text(client.get_text(url))
 
 
 def strip_html_to_text(raw_html: str) -> str:

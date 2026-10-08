@@ -85,6 +85,9 @@ def _qualifies_for_buy_board(report: CompanyReport) -> bool:
 
 def _estimate_share_count(session: Session, report: CompanyReport) -> float | None:
     stats = report.key_stats or {}
+    if stats.get("annual_flow_version") == "SEC_TTM_FLOWS_V1":
+        shares = _safe_float(stats.get("shares_outstanding"))
+        return shares if shares is not None and shares > 0 else None
     for key in (
         "shares_outstanding",
         "weighted_avg_diluted_shares",
@@ -664,7 +667,7 @@ class BuyBoardScheduler:
                 "next_refresh_at": self._snapshot.next_refresh_at,
                 "last_refresh_at": self._snapshot.last_refresh_at,
                 "last_action": self._snapshot.last_action,
-                "last_error": self._snapshot.last_error,
+                "last_error": "buy_board_worker_error" if self._snapshot.last_error else None,
                 "candidate_count": self._snapshot.candidate_count,
                 "last_refresh_count": self._snapshot.last_refresh_count,
                 "last_success_count": self._snapshot.last_success_count,

@@ -9,6 +9,10 @@ from typing import Any
 
 import httpx
 
+from accountant.logging import get_logger
+
+log = get_logger(__name__)
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -82,12 +86,13 @@ def status() -> dict[str, Any]:
             }
         response.raise_for_status()
     except Exception as exc:
+        log.warning("research.market_status_failed", error_type=type(exc).__name__, exc_info=True)
         return {
             "ok": False,
             "connected": False,
             "checked_at": _now_iso(),
             "quality": "unavailable",
-            "reason": str(exc)[:500],
+            "reason": "market_data_unavailable",
             "config": safety_state(),
         }
     return {
@@ -155,11 +160,12 @@ def quote(symbol: str) -> dict[str, Any]:
         response.raise_for_status()
         payload = response.json() or {}
     except Exception as exc:
+        log.warning("research.market_quote_failed", error_type=type(exc).__name__, exc_info=True)
         return {
             "ok": False,
             "symbol": normalized,
             "checked_at": _now_iso(),
-            "reason": str(exc)[:500],
+            "reason": "market_data_unavailable",
             "config": safety_state(),
         }
 
