@@ -192,10 +192,10 @@ class SecClient:
         last_error: Exception | None = None
         attempts = max(1, self._max_retries)
         for attempt in range(1, attempts + 1):
-            self._limiter.wait()
             try:
-                started = time.monotonic()
-                response = self._http.get(url, headers=self._headers())
+                with self._limiter.request_slot():
+                    started = time.monotonic()
+                    response = self._http.get(url, headers=self._headers())
                 elapsed_ms = (time.monotonic() - started) * 1000
                 log.info(
                     "sec.http",

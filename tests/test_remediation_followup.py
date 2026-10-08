@@ -185,6 +185,22 @@ def test_twelve_sec_clients_share_aggregate_request_budget(tmp_path):
         assert sum(start <= instant < start + 1.0 for instant in arrivals) <= 10
 
 
+def test_request_lease_survives_transport_error_and_is_released(tmp_path):
+    import sqlite3
+
+    from accountant.sec.rate_limit import RateLimiter
+
+    path = tmp_path / "clock.sqlite3"
+    limiter = RateLimiter(0.1, state_path=path)
+    assert limiter.min_interval_seconds == 0.12
+    with pytest.raises(RuntimeError, match="transport"), limiter.request_slot():
+        raise RuntimeError("transport")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM request_clock").fetchone()[0] == 1
+    with RateLimiter(0.1, state_path=path).request_slot():
+        pass
+
+
 def test_legacy_companyfacts_path_surfaces_payload_errors(monkeypatch):
     from unittest.mock import MagicMock, Mock
 
