@@ -4,13 +4,21 @@ import argparse
 import threading
 from collections import deque
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Select, exists, func, select
 
 from accountant.db import Base, create_db_engine, create_session_factory, sqlite_write_guard
-from accountant.db.models import CanonicalFact, Company, CompanyReport, RawFact, ReportCard, Security, StatementSnapshot
+from accountant.db.models import (
+    CanonicalFact,
+    Company,
+    CompanyReport,
+    RawFact,
+    ReportCard,
+    Security,
+    StatementSnapshot,
+)
 from accountant.financial.snapshot_service import build_company_statement_snapshots
 from accountant.research.report_machine import MACHINE
 

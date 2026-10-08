@@ -10,7 +10,6 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 DEFAULT_ENDPOINTS = (
     ("health", "GET", "/health", 200),
     ("ready", "GET", "/ready", 200),

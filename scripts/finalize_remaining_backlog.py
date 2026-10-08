@@ -8,7 +8,15 @@ from typing import Any
 from sqlalchemy import Select, func, select
 
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
-from accountant.db.models import CanonicalFact, Company, CompanyReport, Filing, RawFact, Security, StatementSnapshot
+from accountant.db.models import (
+    CanonicalFact,
+    Company,
+    CompanyReport,
+    Filing,
+    RawFact,
+    Security,
+    StatementSnapshot,
+)
 from accountant.financial.snapshot_service import build_company_statement_snapshots
 from accountant.research.report_machine import MACHINE
 

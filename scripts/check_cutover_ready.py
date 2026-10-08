@@ -7,7 +7,6 @@ from collections.abc import Iterable
 
 from sqlalchemy import create_engine, text
 
-
 TABLES: tuple[str, ...] = (
     "companies",
     "company_reports",

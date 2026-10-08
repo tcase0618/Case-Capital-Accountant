@@ -41,13 +41,19 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Ruff
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests scripts alembic
 
       - name: Mypy
         run: uv run mypy src/accountant/api/auth.py src/accountant/config.py --ignore-missing-imports
 
+      - name: Grading Mypy
+        run: uv run mypy src/accountant/research/grading_engine.py src/accountant/research/grading_evidence.py --follow-imports=silent --ignore-missing-imports
+
       - name: Pytest
         run: uv run pytest
+
+      - name: API deprecation regression
+        run: uv run pytest tests/test_remediation_followup.py tests/test_api.py -W 'error::DeprecationWarning:accountant.api.app'
 
       - name: Alembic migration smoke check
         run: uv run alembic upgrade head

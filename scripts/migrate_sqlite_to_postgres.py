@@ -4,7 +4,6 @@ import argparse
 import csv
 import io
 import sqlite3
-from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import psycopg
@@ -106,11 +105,10 @@ def _copy_table(sqlite_con: sqlite3.Connection, pg_con: psycopg.Connection, tabl
             writer.writerow(["\\N" if value is None else value for value in row])
         buffer.seek(0)
 
-        with pg_con.cursor() as pg_cur:
-            with pg_cur.copy(
-                f"COPY {table_name} ({col_list}) FROM STDIN WITH (FORMAT CSV, NULL '\\N')"
-            ) as copy:
-                copy.write(buffer.read())
+        with pg_con.cursor() as pg_cur, pg_cur.copy(
+            f"COPY {table_name} ({col_list}) FROM STDIN WITH (FORMAT CSV, NULL '\\N')"
+        ) as copy:
+            copy.write(buffer.read())
         pg_con.commit()
         copied += len(rows)
         print(f"{table_name}: copied {copied}")
