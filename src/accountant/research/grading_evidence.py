@@ -12,7 +12,7 @@ from accountant.db.models import Filing, RawFact
 from accountant.research.factor_engine import _annual_periods, _beneish_m_score, _period_label
 from accountant.research.filing_signal_engine import fetch_filing_text, strip_html_to_text
 
-RULE_VERSION = "DISCLOSURE_GRADING_V2"
+RULE_VERSION = "DISCLOSURE_GRADING_V3"
 _NON_RELIANCE = re.compile(
     r"(?:financial statements|financial results)[^.]{0,160}"
     r"(?:should|must|can) no longer be relied (?:upon|on)"
@@ -43,10 +43,28 @@ def build_disclosure_evidence(
     cutoff = (latest.filing_date if latest and latest.filing_date else date.today()) - timedelta(
         days=365
     )
+    # Current reports do not replace periodic financial disclosures. Retain the
+    # most recent base filing AND its amendments for each periodic form family.
+    periodic: list[Filing] = []
+    for form in ("10-K", "10-Q", "20-F", "40-F"):
+        base = max(
+            (f for f in filings if (f.form_type or "").upper() == form),
+            key=lambda f: f.filing_date or date.min,
+            default=None,
+        )
+        if base is not None:
+            periodic.append(base)
+        periodic.extend(
+            f
+            for f in filings
+            if (f.form_type or "").upper() == form + "/A"
+            and (base is None or (f.filing_date or date.min) >= (base.filing_date or date.min))
+        )
     candidates = [
         filing
         for filing in filings
         if filing is latest
+        or any(filing is item for item in periodic)
         or (
             (filing.form_type or "").upper() in {"8-K", "8-K/A"}
             and filing.filing_date
@@ -76,7 +94,22 @@ def build_disclosure_evidence(
             and not re.search(r"\b(?:may|might|could|would)\b[^.]{0,50}substantial doubt", sentence)
             for sentence in sentences
         )
-        positive_restatement = bool(_NON_RELIANCE.search(text))
+        positive_restatement = False
+        ambiguous_restatement = False
+        for sentence in sentences:
+            if not _NON_RELIANCE.search(sentence):
+                continue
+            # A lexical match in hypothetical/negated language is not evidence
+            # of an actual board determination. Preserve it as UNKNOWN, not clean.
+            if re.search(
+                r"\b(?:if|unless|may|might|could|would|not|never|possible|potential)\b"
+                r"|\bno\b(?!\s+longer)",
+                sentence,
+            ):
+                ambiguous_restatement = True
+            else:
+                positive_restatement = True
+        incomplete |= ambiguous_restatement
         concern |= positive_concern
         restatement |= positive_restatement
         sources.append(
@@ -87,6 +120,7 @@ def build_disclosure_evidence(
                 "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "going_concern_match": positive_concern,
                 "non_reliance_match": positive_restatement,
+                "non_reliance_ambiguous": ambiguous_restatement,
             }
         )
         if filing is latest and filing.is_amendment:
