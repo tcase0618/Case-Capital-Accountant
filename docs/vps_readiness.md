@@ -125,18 +125,22 @@ Backups run through the `backup` service and are stored in the `accountant_backu
 Manual backup:
 
 ```bash
-docker compose -f docker-compose.prod.yml exec backup bash scripts/backup_postgres.sh
+docker compose -f docker-compose.prod.yml exec backup gosu postgres bash /scripts/backup_postgres.sh
 ```
 
-Restore drill:
+Restore verification uses an existing, empty scratch database whose name starts with `accountant_restore_test_`. It never drops or restores over the production database. Supply `ACCOUNTANT_RESTORE_TEST_URL` for that isolated database:
 
 ```bash
-docker compose -f docker-compose.prod.yml stop api scheduler
-docker compose -f docker-compose.prod.yml exec postgres dropdb -U accountant accountant
-docker compose -f docker-compose.prod.yml exec postgres createdb -U accountant accountant
-docker compose -f docker-compose.prod.yml exec postgres pg_restore -U accountant -d accountant /backups/<backup-file>.dump
-docker compose -f docker-compose.prod.yml up -d api scheduler
+docker compose -f docker-compose.prod.yml exec -e ACCOUNTANT_RESTORE_TEST_URL backup gosu postgres bash /scripts/verify_backup_restore.sh /backups/<backup-file>.dump
 ```
+
+The verifier checks checksums and archive listing before restoring, then compares restored counts with COPY records from the immutable archive, never with the changing source database. New dumps include a checksummed `.counts` manifest. After a drill, an operator must clean up only the explicitly named scratch database or supply a new empty scratch database; no automated database deletion is performed. A failed drill leaves the scratch database intact for diagnosis.
+
+Retention runs before the headroom check and only expires dumps when at least two checksum-verified archives exist. The newest two verified archives are protected regardless of age. If that recovery-copy floor is not met, no dumps are expired, including legacy dumps without checksums. Orphaned sidecars are removed. Checksum verification is not a substitute for a scratch restore test. `/backups/status.json` records sanitized failure codes, last success, and total backup footprint. Copy this status file to the monitoring host and pass its path to `vps_readiness_check.py --backup-status-file`; missing, stale, or failed backup status blocks readiness. Off-host transfer and alert delivery still require operator configuration.
+
+The backup service uses PostgreSQL 16 tools, restrictive permissions, a disk-headroom precheck, and an atomic partial-file handoff. Pull verified dumps and checksums off-host before treating backups as disaster recovery; no off-host destination has been configured by this change.
+
+The API port now binds to loopback. Operators must supply a TLS reverse proxy before external access. Container health uses `/health`; business readiness remains a separate operator check.
 
 ## Known Local Audit Findings From 2026-09-20
 
