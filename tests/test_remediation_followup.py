@@ -256,6 +256,11 @@ def test_report_build_persists_grading_evidence_without_external_calls(
     monkeypatch.setattr(signals, "fetch_filing_text", lambda *_: text)
     monkeypatch.setattr(evidence, "fetch_filing_text", lambda *_: text)
     monkeypatch.setattr(machine, "_resolved_current_price", lambda *_, **__: None)
+    monkeypatch.setattr(
+        machine,
+        "membership_for_ticker",
+        lambda _: SimpleNamespace(in_sp500=None, in_russell2000=None, in_nasdaq_comp=None),
+    )
     machine.ContinuousResearchMachine()._build_report(test_session, company, "SYN")
     test_session.commit()
     card = test_session.query(ReportCard).one()
