@@ -58,13 +58,22 @@ jobs:
       - name: Alembic migration smoke check
         run: uv run alembic upgrade head
 
+      - name: Migrated research tables and schema gate
+        run: uv run python scripts/check_research_schema.py
+
+      - name: Full legacy schema drift audit (not yet a clean baseline)
+        continue-on-error: true
+        run: uv run alembic check
+
       - name: Backup and isolated restore with PostgreSQL 16
         run: |
           mkdir -p "$RUNNER_TEMP/accountant-backups"
           export SOURCE_URL=postgresql://accountant:accountant@127.0.0.1:5432/accountant
           export SCRATCH_URL=postgresql://accountant:accountant@127.0.0.1:5432/accountant_restore_test_ci
+          docker run --rm --network host postgres:16-bookworm psql "$SOURCE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO companies (id,cik,name) VALUES ('00000000-0000-0000-0000-000000000001','0000000001','CI snapshot fixture')"
           docker run --rm --network host postgres:16-bookworm psql "$SOURCE_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE accountant_restore_test_ci'
           docker run --rm --network host -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP/accountant-backups:/backups" -e DATABASE_URL="$SOURCE_URL" -e ACCOUNTANT_BACKUP_MIN_FREE_BYTES=0 postgres:16-bookworm bash /scripts/backup_postgres.sh
+          docker run --rm --network host postgres:16-bookworm psql "$SOURCE_URL" -v ON_ERROR_STOP=1 -c "INSERT INTO companies (id,cik,name) VALUES ('00000000-0000-0000-0000-000000000002','0000000002','CI post-dump fixture')"
           docker run --rm --network host -v "$PWD/scripts:/scripts:ro" -v "$RUNNER_TEMP/accountant-backups:/backups" -e DATABASE_URL="$SOURCE_URL" -e ACCOUNTANT_RESTORE_TEST_URL="$SCRATCH_URL" postgres:16-bookworm bash -c 'dump=$(find /backups -name "*.dump" -type f -print -quit); test "$(stat -c %a "$dump")" = 600; bash /scripts/verify_backup_restore.sh "$dump"'
 
   docker:
