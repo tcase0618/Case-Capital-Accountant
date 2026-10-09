@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from accountant.db.base import Base
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 class Company(Base):
     __tablename__ = "companies"
+    __table_args__ = (UniqueConstraint("cik", name="uq_companies_cik"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(), primary_key=True, default=uuid.uuid4)
     cik: Mapped[str] = mapped_column(String(10), nullable=False, unique=True, index=True)

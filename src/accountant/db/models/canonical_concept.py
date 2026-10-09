@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from accountant.db.base import Base
@@ -20,6 +20,7 @@ class CanonicalConcept(Base):
     """Case Capital canonical accounting concept."""
 
     __tablename__ = "canonical_concepts"
+    __table_args__ = (UniqueConstraint("code", name="uq_canonical_concepts_code"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(), primary_key=True, default=uuid.uuid4)
     code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)

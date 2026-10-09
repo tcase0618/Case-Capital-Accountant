@@ -33,7 +33,7 @@ class CalculationResult(Base):
     )
     calculation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     formula_version: Mapped[str] = mapped_column(String(50), nullable=False)
-    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     fiscal_quarter: Mapped[int | None] = mapped_column(Integer, nullable=True)
     period_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
 

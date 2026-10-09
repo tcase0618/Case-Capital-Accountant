@@ -61,8 +61,7 @@ jobs:
       - name: Migrated research tables and schema gate
         run: uv run python scripts/check_research_schema.py
 
-      - name: Full legacy schema drift audit (not yet a clean baseline)
-        continue-on-error: true
+      - name: Full Alembic schema drift gate
         run: uv run alembic check
 
       - name: Backup and isolated restore with PostgreSQL 16
