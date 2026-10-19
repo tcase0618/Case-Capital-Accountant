@@ -54,7 +54,11 @@ _NEGATIVE_TONE_WORDS = {
     "volatility",
     "weakness",
 }
-_AUDITOR_CONTEXT_KEYWORDS = ("auditor", "independent registered public accounting firm", "accounting firm")
+_AUDITOR_CONTEXT_KEYWORDS = (
+    "auditor",
+    "independent registered public accounting firm",
+    "accounting firm",
+)
 _AUDITOR_CHANGE_KEYWORDS = (
     "dismissed",
     "resigned",
@@ -94,7 +98,7 @@ class EventSignalBundle:
 
 @dataclass(frozen=True)
 class GovernanceSignalBundle:
-    insider_buy_cluster_flag: bool
+    insider_buy_cluster_flag: bool | None
     insider_net_shares_bought_90d: float | None
     institutional_ownership_pct: float | None
     institutional_ownership_qoq_delta: float | None
@@ -102,6 +106,11 @@ class GovernanceSignalBundle:
     short_interest_delta: float | None
     dual_class_flag: bool
     audit_fee_ratio: float | None
+    form4_filing_count_90d: int
+    insider_direction_status: str
+    as_of_date: str
+    source_accessions: tuple[str, ...]
+    rule_version: str = "GOVERNANCE_AS_OF_V2_FORM4_COUNT_ONLY"
 
 
 @dataclass(frozen=True)
@@ -139,7 +148,9 @@ def build_textual_signals(
     yoy_similarity = cosine_similarity(latest_text, prior_text) if prior_text else None
     if yoy_similarity is not None:
         summary_parts.append(f"filing similarity {yoy_similarity:.2f}")
-    risk_similarity = cosine_similarity(latest_risk, prior_risk) if latest_risk and prior_risk else None
+    risk_similarity = (
+        cosine_similarity(latest_risk, prior_risk) if latest_risk and prior_risk else None
+    )
     if risk_similarity is not None:
         summary_parts.append(f"risk similarity {risk_similarity:.2f}")
 
@@ -172,8 +183,12 @@ def build_textual_signals(
     summary = "; ".join(summary_parts) if summary_parts else None
 
     return TextualSignalBundle(
-        yoy_filing_similarity_score=round(yoy_similarity, 4) if yoy_similarity is not None else None,
-        risk_factor_similarity_score=round(risk_similarity, 4) if risk_similarity is not None else None,
+        yoy_filing_similarity_score=round(yoy_similarity, 4)
+        if yoy_similarity is not None
+        else None,
+        risk_factor_similarity_score=round(risk_similarity, 4)
+        if risk_similarity is not None
+        else None,
         mgmt_tone_score=round(tone_score, 4) if tone_score is not None else None,
         reverse_factoring_disclosed=reverse_factoring,
         pension_discount_rate=discount_rate,
@@ -186,12 +201,21 @@ def build_textual_signals(
 def build_event_red_flags(
     filings: list[Filing],
     *,
+    as_of: date,
     sec_user_agent: str,
     fetch_text: Callable[[str, str], str] | None = None,
 ) -> EventSignalBundle:
     fetch = fetch_text or fetch_filing_text
-    today_cutoff = date.today() - timedelta(days=365)
-    recent_filings = [filing for filing in filings if filing.filing_date and filing.filing_date >= today_cutoff]
+    today_cutoff = as_of - timedelta(days=365)
+    recent_filings = sorted(
+        [
+            filing
+            for filing in filings
+            if filing.filing_date and today_cutoff <= filing.filing_date <= as_of
+        ],
+        key=lambda filing: filing.filing_date,
+        reverse=True,
+    )
 
     sec_comment_letter_flag = any(
         (filing.form_type or "").upper() in {"UPLOAD", "CORRESP"} for filing in recent_filings
@@ -226,7 +250,9 @@ def build_event_red_flags(
     auditor_tenure_years = None
     if auditor_changed_flag and auditor_change_date:
         try:
-            auditor_tenure_years = round((date.today() - date.fromisoformat(auditor_change_date)).days / 365.0, 2)
+            auditor_tenure_years = round(
+                (as_of - date.fromisoformat(auditor_change_date)).days / 365.0, 2
+            )
         except ValueError:
             auditor_tenure_years = None
 
@@ -246,31 +272,48 @@ def build_event_red_flags(
 def build_governance_signals(
     filings: list[Filing],
     *,
+    as_of: date,
     sec_user_agent: str,
     fetch_text: Callable[[str, str], str] | None = None,
     security_count: int = 1,
 ) -> GovernanceSignalBundle:
     fetch = fetch_text or fetch_filing_text
-    recent_cutoff = date.today() - timedelta(days=90)
-    form4s = [filing for filing in filings if (filing.form_type or "").upper() == "4" and filing.filing_date and filing.filing_date >= recent_cutoff]
-    insider_buy_cluster_flag = len(form4s) >= 2
-    insider_net_shares_bought_90d = float(len(form4s)) if form4s else None
-
-    latest_filing = filings[0] if filings else None
+    recent_cutoff = as_of - timedelta(days=90)
+    eligible = [filing for filing in filings if filing.filing_date and filing.filing_date <= as_of]
+    form4s = [
+        filing
+        for filing in eligible
+        if (filing.form_type or "").upper() == "4" and filing.filing_date >= recent_cutoff
+    ]
+    # Form metadata carries neither transaction codes nor share quantities.
+    # Keep compatibility keys UNKNOWN; expose the quantity we actually know.
+    latest_filing = max(eligible, key=lambda filing: filing.filing_date, default=None)
     latest_text = ""
     if latest_filing and latest_filing.source_url:
         latest_text = fetch(latest_filing.source_url, sec_user_agent)
     audit_fees = extract_audit_fee_ratio(latest_text)
 
     return GovernanceSignalBundle(
-        insider_buy_cluster_flag=insider_buy_cluster_flag,
-        insider_net_shares_bought_90d=insider_net_shares_bought_90d,
+        insider_buy_cluster_flag=None,
+        insider_net_shares_bought_90d=None,
         institutional_ownership_pct=None,
         institutional_ownership_qoq_delta=None,
         short_interest_pct_float=None,
         short_interest_delta=None,
         dual_class_flag=security_count > 1,
         audit_fee_ratio=audit_fees,
+        form4_filing_count_90d=len(form4s),
+        insider_direction_status="unknown_transaction_codes_not_parsed",
+        as_of_date=as_of.isoformat(),
+        source_accessions=tuple(
+            sorted(
+                {
+                    filing.accession_number
+                    for filing in form4s
+                    if getattr(filing, "accession_number", None)
+                }
+            )
+        ),
     )
 
 
@@ -411,7 +454,9 @@ def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
 
 
 def is_auditor_change_disclosure(text: str) -> bool:
-    return contains_any(text, _AUDITOR_CONTEXT_KEYWORDS) and contains_any(text, _AUDITOR_CHANGE_KEYWORDS)
+    return contains_any(text, _AUDITOR_CONTEXT_KEYWORDS) and contains_any(
+        text, _AUDITOR_CHANGE_KEYWORDS
+    )
 
 
 def extract_auditor_name(text: str) -> str | None:
@@ -446,7 +491,9 @@ def extract_non_gaap_eps(text: str) -> float | None:
 def extract_audit_fee_ratio(text: str) -> float | None:
     if not text:
         return None
-    audit_match = re.search(r"audit fees[^0-9]{0,40}\$?\(?([0-9][0-9,]*(?:\.\d+)?)\)?", text, re.IGNORECASE)
+    audit_match = re.search(
+        r"audit fees[^0-9]{0,40}\$?\(?([0-9][0-9,]*(?:\.\d+)?)\)?", text, re.IGNORECASE
+    )
     non_audit_match = re.search(
         r"(?:audit-related fees|tax fees|all other fees)[^0-9]{0,40}\$?\(?([0-9][0-9,]*(?:\.\d+)?)\)?",
         text,

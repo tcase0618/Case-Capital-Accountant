@@ -1187,6 +1187,7 @@ class ContinuousResearchMachine:
         upsert_company_bottleneck_snapshot(session, company=company, report=report)
 
     def _build_report(self, session: Session, company: Company, ticker: str) -> None:
+        report_as_of = date.today()
         filings = session.execute(
             select(Filing)
             .where(Filing.company_id == company.id)
@@ -1235,6 +1236,7 @@ class ContinuousResearchMachine:
         ]
         event_signal_bundle = build_event_red_flags(
             filings,
+            as_of=report_as_of,
             sec_user_agent=get_settings().sec_user_agent,
         )
 
@@ -1409,6 +1411,7 @@ class ContinuousResearchMachine:
         security_count = len({security.ticker for security in company.securities if security.ticker})
         governance_signal_bundle = build_governance_signals(
             filings,
+            as_of=report_as_of,
             sec_user_agent=get_settings().sec_user_agent,
             security_count=security_count,
         )
@@ -1523,7 +1526,7 @@ class ContinuousResearchMachine:
 
         report = _latest_company_report(session, company.id)
         if report is None:
-            report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=date.today().isoformat(), stance=stance)
+            report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=report_as_of.isoformat(), stance=stance)
             session.add(report)
         current_price = _resolved_current_price(ticker, fallback=_safe_float(report.current_price))
         market_cap = (current_price * diluted_shares) if current_price is not None and diluted_shares is not None else None
@@ -1536,7 +1539,7 @@ class ContinuousResearchMachine:
         )
         report.ticker = ticker
         report.company_name = company.name
-        report.as_of_date = date.today().isoformat()
+        report.as_of_date = report_as_of.isoformat()
         report.stance = stance
         report.bullish_score = bullish_score
         report.bearish_score = bearish_score
@@ -1604,6 +1607,8 @@ class ContinuousResearchMachine:
         report.report_markdown = report_markdown
         report.source_versions = {
             "report_machine": "V2_CONTINUOUS_MACHINE",
+            "governance_signals": governance_signal_bundle.rule_version,
+            "event_signals": "EVENT_SIGNALS_AS_OF_V2",
             "classification": research.rule_version,
             "data_quality": quality.assessment_version,
             "factors": factor_pack.factor_version,
@@ -1818,6 +1823,11 @@ class ContinuousResearchMachine:
                 "recurring_nonrecurring_flag": non_gaap_signal_bundle.recurring_nonrecurring_flag,
             },
             "governance_ownership": {
+                "rule_version": governance_signal_bundle.rule_version,
+                "as_of_date": governance_signal_bundle.as_of_date,
+                "source_accessions": list(governance_signal_bundle.source_accessions),
+                "form4_filing_count_90d": governance_signal_bundle.form4_filing_count_90d,
+                "insider_direction_status": governance_signal_bundle.insider_direction_status,
                 "insider_buy_cluster_flag": governance_signal_bundle.insider_buy_cluster_flag,
                 "insider_net_shares_bought_90d": _maybe_round(governance_signal_bundle.insider_net_shares_bought_90d),
                 "institutional_ownership_pct": governance_signal_bundle.institutional_ownership_pct,

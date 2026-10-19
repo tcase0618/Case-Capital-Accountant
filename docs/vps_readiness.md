@@ -155,6 +155,19 @@ The API port now binds to loopback. Operators must supply a TLS reverse proxy be
 
 ## Do Not Deploy If
 
+Scheduler readiness requires a successful `scheduler_cycle_status.json` under
+`DATA_DIR` (or pass `--scheduler-status-file`). Missing, failed, future-dated,
+or over-36-hour-old status fails the checker. This is a readiness ceiling,
+not evidence that the 15-minute polling target was met or that alerts were
+delivered. Configure monitoring separately. The compose scheduler now uses
+`ACCOUNTANT_ACTIVE_POLL_INTERVAL_SECONDS` (default 900), matching its script.
+
+If legacy-only backups leave too little disk headroom, do not delete the last
+recovery copy or bypass retention. First copy archives to an approved off-host
+destination, verify checksums and perform an isolated scratch restore. Then
+add capacity or separately approve archival cleanup. No off-host transfer,
+credentials, cleanup, or production operation is configured by this change.
+
 - `docker compose config` fails.
 - `scripts/vps_readiness_check.py` fails.
 - `last_error` is non-null in `/api/reports/status`.
