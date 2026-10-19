@@ -155,6 +155,26 @@ The API port now binds to loopback. Operators must supply a TLS reverse proxy be
 
 ## Do Not Deploy If
 
+Scheduler readiness also requires a recent successful `scheduler_cycle_status.json`
+under `DATA_DIR` (or pass `--scheduler-status-file` to the readiness checker).
+Missing, failed, future-dated, or over-36-hour-old status fails readiness; this
+does not deliver alerts automatically. Configure the monitoring destination
+separately. `ACCOUNTANT_ACTIVE_POLL_INTERVAL_SECONDS` controls the scheduler;
+the unused `ACCOUNTANT_AUTOMATION_INTERVAL_SECONDS` compose setting was removed.
+
+### Legacy-only backups and low disk headroom
+
+Retention preserves all recovery copies until at least
+`ACCOUNTANT_BACKUP_KEEP_VERIFIED` (default two) checksum-verified replacements
+exist. A legacy-only directory can therefore remain blocked on low headroom.
+Do not bypass the guard or delete the last recovery copy. An operator must
+first copy existing archives to an approved off-host destination, verify their
+checksums and perform an isolated scratch restore, then provide additional
+disk capacity or separately approve archival cleanup. Run a new backup and
+scratch restore, confirm `status.json` reports success, and retain the verified
+off-host copies. No destination, credentials, transfer, cleanup, or production
+operation is configured or executed by this code change.
+
 - `docker compose config` fails.
 - `scripts/vps_readiness_check.py` fails.
 - `last_error` is non-null in `/api/reports/status`.

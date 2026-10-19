@@ -35,14 +35,26 @@ trap cleanup EXIT
 # archives regardless of age. Only our timestamped dump family is eligible.
 mapfile -t dumps < <(find "$backup_dir" -maxdepth 1 -type f -name 'accountant_*.dump' | sort -r)
 verified_kept=0
+protected_dumps=()
 for dump in "${dumps[@]}"; do
   name="$(basename -- "$dump")"
   [[ "$name" =~ ^accountant_[0-9]{8}T[0-9]{6}Z\.dump$ ]] || continue
   if [ "$verified_kept" -lt "$keep_verified" ] && [ -f "$dump.sha256" ] && \
     (cd "$backup_dir" && sha256sum --check "$name.sha256" >/dev/null 2>&1); then
     verified_kept=$((verified_kept + 1))
-    continue
+    protected_dumps+=("$dump")
   fi
+done
+for dump in "${dumps[@]}"; do
+  name="$(basename -- "$dump")"
+  [[ "$name" =~ ^accountant_[0-9]{8}T[0-9]{6}Z\.dump$ ]] || continue
+  # Do not remove ANY recovery copies until N verified replacements exist.
+  [ "$verified_kept" -ge "$keep_verified" ] || continue
+  protected=false
+  for kept in "${protected_dumps[@]}"; do
+    if [ "$dump" = "$kept" ]; then protected=true; break; fi
+  done
+  if "$protected"; then continue; fi
   if [ -n "$(find "$dump" -mtime +"$retention_days" -print)" ]; then
     rm -f -- "$dump" "$dump.sha256" "$dump.counts" "$dump.restore_verified"
   fi

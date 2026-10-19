@@ -109,6 +109,15 @@ def test_blocked_backup_prunes_expired_sidecars_but_keeps_two_verified(shell):
     assert status["backup_bytes"] > 0
 
 
+def test_legacy_only_recovery_copies_are_preserved_when_backup_is_blocked(shell):
+    directory, run = shell
+    dump = old_dump(directory, "20260101T000000Z")
+    dump.with_suffix(".dump.sha256").unlink()
+    result = run("backup_postgres.sh", ACCOUNTANT_BACKUP_MIN_FREE_BYTES="999999999999999")
+    assert result.returncode == 1
+    assert dump.exists(), "Never delete the only unverified recovery copy"
+
+
 def test_restore_uses_dump_snapshot_not_current_source(shell):
     directory, run = shell
     backup = run("backup_postgres.sh")

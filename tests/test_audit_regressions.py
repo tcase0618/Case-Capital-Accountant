@@ -132,7 +132,7 @@ def test_failed_text_is_unknown_event(monkeypatch):
     from accountant.research.filing_signal_engine import build_event_red_flags
 
     filing = Filing(form_type="8-K", filing_date=date.today(), source_url="https://www.sec.gov/test")
-    flags = build_event_red_flags([filing], sec_user_agent="test", fetch_text=lambda *args: "")
+    flags = build_event_red_flags([filing], as_of=filing.filing_date, sec_user_agent="test", fetch_text=lambda *args: "")
     assert flags.auditor_changed_flag is None
     assert flags.ceo_turnover_flag is None
     assert flags.cfo_turnover_flag is None

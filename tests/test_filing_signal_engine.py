@@ -104,6 +104,7 @@ def test_build_event_red_flags_detects_comment_letters_and_turnover() -> None:
 
     signals = build_event_red_flags(
         filings,
+        as_of=date(2026, 8, 1),
         sec_user_agent="Case Capital Accountant test@example.com",
         fetch_text=lambda url, _ua: payloads.get(url, ""),
     )
@@ -134,6 +135,7 @@ def test_build_event_red_flags_does_not_treat_generic_auditor_language_as_change
 
     signals = build_event_red_flags(
         filings,
+        as_of=date(2026, 8, 1),
         sec_user_agent="Case Capital Accountant test@example.com",
         fetch_text=lambda url, _ua: payloads.get(url, ""),
     )
@@ -153,7 +155,7 @@ def test_extract_non_gaap_eps_and_audit_fee_ratio() -> None:
     assert extract_audit_fee_ratio(text) == 0.25
 
 
-def test_build_governance_signals_detects_form4_cluster_and_dual_class() -> None:
+def test_build_governance_signals_counts_form4_without_inventing_buy_direction() -> None:
     filings = [
         SimpleNamespace(form_type="10-K", filing_date=date(2026, 3, 1), source_url="tenk"),
         SimpleNamespace(form_type="4", filing_date=date(2026, 8, 1), source_url=None),
@@ -168,15 +170,18 @@ def test_build_governance_signals_detects_form4_cluster_and_dual_class() -> None
 
     signals = build_governance_signals(
         filings,
+        as_of=date(2026, 8, 1),
         sec_user_agent="Case Capital Accountant test@example.com",
         fetch_text=lambda url, _ua: payloads.get(url, ""),
         security_count=2,
     )
 
-    assert signals.insider_buy_cluster_flag is True
-    assert signals.insider_net_shares_bought_90d == 2.0
+    assert signals.form4_filing_count_90d == 2
+    assert signals.insider_buy_cluster_flag is None
+    assert signals.insider_net_shares_bought_90d is None
     assert signals.dual_class_flag is True
-    assert signals.audit_fee_ratio == 0.1
+    # The latest eligible filing has no text; do not backfill an older ratio.
+    assert signals.audit_fee_ratio is None
 
 
 def test_build_non_gaap_signals_calculates_gap_and_trend() -> None:

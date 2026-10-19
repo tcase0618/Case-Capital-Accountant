@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,12 +17,19 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
     parser.add_argument("--max-sec-staleness-days", type=int, default=3)
     parser.add_argument("--backup-status-file", type=Path, default=Path("/backups/status.json"))
+    parser.add_argument(
+        "--scheduler-status-file",
+        type=Path,
+        default=Path(os.environ.get("DATA_DIR", "data")) / "scheduler_cycle_status.json",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
     checks: list[dict[str, Any]] = []
     backup = backup_status(args.backup_status_file)
     _expect(checks, "backup_recent_and_successful", backup["ok"], backup)
+    scheduler = scheduler_status(args.scheduler_status_file)
+    _expect(checks, "scheduler_recent_and_successful", scheduler["ok"], scheduler)
 
     with httpx.Client(timeout=30.0) as client:
         health = _get_json(client, f"{base_url}/health", checks, "health")
@@ -85,6 +93,25 @@ def backup_status(path: Path) -> dict[str, Any]:
         }
     except (OSError, ValueError, KeyError, TypeError):
         return {"ok": False, "last_error": "backup_status_unavailable"}
+
+
+def scheduler_status(path: Path) -> dict[str, Any]:
+    try:
+        status = json.loads(path.read_text())
+        last_cycle = datetime.fromisoformat(status["last_cycle_at"])
+        if last_cycle.tzinfo is None:
+            raise ValueError("timestamp must be timezone-aware")
+        age = (datetime.now(UTC) - last_cycle).total_seconds()
+        return {
+            "ok": status["status"] == "complete"
+            and status["exit_code"] == 0
+            and 0 <= age <= 36 * 3600,
+            "status": status["status"],
+            "exit_code": status["exit_code"],
+            "last_cycle_at": status["last_cycle_at"],
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"ok": False, "status": "scheduler_status_unavailable"}
 
 
 def _get_json(
