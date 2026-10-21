@@ -49,6 +49,9 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+      - name: Full-source Mypy debt ratchet
+        run: uv run python scripts/check_mypy_baseline.py
+
       - name: Alembic migration smoke check
         run: uv run alembic upgrade head
 

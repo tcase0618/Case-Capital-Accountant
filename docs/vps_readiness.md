@@ -114,7 +114,11 @@ Required pass criteria:
 - `/api/reports/status` returns `running=true`.
 - `last_error` is null.
 - `/api/source-integrity` returns `STRONG` or `WATCH`.
-- SEC freshness is within the configured limit.
+- SEC freshness is within `--max-sec-staleness-days` EDGAR business days (default 3),
+  using the current America/New_York date and standard observed federal holidays,
+  not stock-market holidays or the API's calendar-day counter. Missing, malformed,
+  future, or unsupported filing dates fail closed. `EDGAR_FEDERAL_HOLIDAYS_V1`
+  supports 2021 onward; exceptional SEC closures require an explicit calendar update.
 - Report coverage is at least 99%.
 - Bottleneck coverage is at least 99%.
 
