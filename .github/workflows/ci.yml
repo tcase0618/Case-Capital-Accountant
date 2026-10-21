@@ -49,6 +49,9 @@ jobs:
       - name: Grading Mypy
         run: uv run mypy src/accountant/research/grading_engine.py src/accountant/research/grading_evidence.py --follow-imports=silent --ignore-missing-imports
 
+      - name: Full-source Mypy debt ratchet
+        run: uv run python scripts/check_mypy_baseline.py
+
       - name: Pytest
         run: uv run pytest
 
