@@ -47,3 +47,30 @@ User authorized selective main promotion and Accountant VPS deployment.
   process or successful deploy will not be represented as a current universe.
 - No frontend source changes since the deployed commit; reuse the existing
   frontend build rather than rebuilding unchanged assets during this update.
+
+## Deployment Follow-Up
+
+- Main commit `c37687f` passed both CI jobs (run 39598945481), including
+  its full-source type baseline, migration smoke and production image build.
+  VPS fast-forwarded to that exact SHA and restarted API/scheduler.
+- API database health passed at `/health`; command-center and existing JS
+  asset returned 200; protected integration endpoint returned 401 without
+  credentials. `/health/db` is not a health route (it serves the SPA fallback)
+  and was not treated as database evidence. Both services were active with
+  fresh start times and zero automatic restarts.
+- Post-restart worker storage gate still blocked. Scheduler persisted a real
+  failure: its casecapital user could not write the root-owned
+  `artifacts/automation` directory. Corrected only that directory's ownership;
+  no recursive ownership or data deletion was performed.
+- Independent follow-up: scheduler admission had no configured worker reserve,
+  whereas report workers reserve 128 MiB. With 14,902,639,639 database bytes
+  against a 14 GiB cap, that difference admitted scheduling jobs while workers
+  correctly refused them. Add the same configured reserve to scheduler
+  preflight; a regression proves it does not launch import when reserve
+  exceeds cap. No cap was raised or disabled. Scheduler was briefly stopped
+  while validating this guard, leaving the API available.
+- Follow-up local suite: 427 passed, one dependency warning; focused Ruff
+  passed. Runtime scheduler status/partial files are now ignored by Git.
+- VPS does not have pytest installed. No dev dependencies were installed into
+  production. Direct offline calendar/governance assertions and shell syntax
+  checks passed there; local/CI pytest remains separate evidence.

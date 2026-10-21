@@ -104,6 +104,7 @@ def main() -> int:
         database_bytes=storage_before["database_bytes"],
         disk_free_bytes=storage_before["disk_free_bytes"],
         cycle_start_database_bytes=storage_before["database_bytes"],
+        reserved_bytes=max(0, settings.storage_worker_reserve_mb) * 1024 * 1024,
     )
     if not preflight.allowed:
         payload = {

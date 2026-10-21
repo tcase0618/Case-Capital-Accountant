@@ -29,6 +29,8 @@ data/parquet/*
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/scheduler_cycle_status.json
+data/scheduler_cycle_status.json.partial
 accountant-ci-local.db
 *.duckdb
 *.duckdb.wal
