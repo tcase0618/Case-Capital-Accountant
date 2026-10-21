@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
+
+from accountant.ops.edgar_calendar import CALENDAR_VERSION, edgar_business_days_since
 
 
 def main() -> int:
@@ -15,7 +18,12 @@ def main() -> int:
         description="Validate Accountant VPS readiness through live API endpoints."
     )
     parser.add_argument("--base-url", default="http://127.0.0.1:8010")
-    parser.add_argument("--max-sec-staleness-days", type=int, default=3)
+    parser.add_argument(
+        "--max-sec-staleness-days",
+        type=int,
+        default=3,
+        help="Maximum EDGAR business days after the latest filing (default: 3).",
+    )
     parser.add_argument("--backup-status-file", type=Path, default=Path("/backups/status.json"))
     parser.add_argument(
         "--scheduler-status-file",
@@ -56,9 +64,8 @@ def main() -> int:
         source,
     )
     sec = source.get("sec") or {}
-    staleness_value = sec.get("days_since_latest_filing")
-    staleness = int(staleness_value) if staleness_value is not None else 999
-    _expect(checks, "sec_fresh_enough", staleness <= args.max_sec_staleness_days, sec)
+    freshness = sec_freshness(sec, max_business_days=args.max_sec_staleness_days)
+    _expect(checks, "sec_fresh_enough", freshness["ok"], freshness)
     coverage = source.get("coverage") or {}
     _expect(
         checks,
@@ -76,6 +83,22 @@ def main() -> int:
     ok = all(check["ok"] for check in checks)
     print(json.dumps({"ok": ok, "checks": checks}, indent=2))
     return 0 if ok else 1
+
+
+def sec_freshness(sec: dict[str, Any], *, max_business_days: int) -> dict[str, Any]:
+    as_of = datetime.now(ZoneInfo("America/New_York")).date()
+    detail = {
+        "calendar_version": CALENDAR_VERSION,
+        "as_of_date": as_of.isoformat(),
+        "latest_filing_date": sec.get("latest_filing_date"),
+        "max_business_days": max_business_days,
+    }
+    try:
+        latest = date.fromisoformat(sec["latest_filing_date"])
+        age = edgar_business_days_since(latest, as_of=as_of)
+    except (ValueError, KeyError, TypeError):
+        return {**detail, "ok": False, "error": "sec_filing_date_unavailable_or_invalid"}
+    return {**detail, "ok": 0 <= age <= max_business_days, "business_days_since_latest_filing": age}
 
 
 def backup_status(path: Path) -> dict[str, Any]:
