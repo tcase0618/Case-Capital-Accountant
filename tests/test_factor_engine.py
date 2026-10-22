@@ -16,13 +16,22 @@ def _fact(
     period_end: date,
     fiscal_period: str = "FY",
 ) -> RawFact:
+    # Fixtures model reported durations rather than relying on fiscal labels.
+    flows = {
+        "RevenueFromContractWithCustomerExcludingAssessedTax", "NetIncomeLoss",
+        "CostOfGoodsSold", "DepreciationAndAmortization", "SellingGeneralAndAdministrativeExpense",
+        "NetCashProvidedByUsedInOperatingActivities", "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsOfDividends", "InterestExpense", "OperatingIncomeLoss",
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+    }
     return RawFact(
         id=uuid.uuid4(),
         filing_id=uuid.uuid4(),
         company_id=uuid.uuid4(),
         concept=concept,
         taxonomy="us-gaap",
-        unit="USD",
+        unit="shares" if "SharesOutstanding" in concept else "USD",
+        period_start=date(fiscal_year, 1, 1) if concept in flows else None,
         period_end=period_end,
         value_numeric=Decimal(str(value)),
         fact_hash=f"{concept}-{fiscal_year}-{value}",
@@ -104,13 +113,16 @@ def test_build_accounting_factor_pack_computes_expected_core_factors() -> None:
     assert pack.beneish_m_score is not None and round(pack.beneish_m_score, 3) == -1.894
     assert pack.cash_based_operating_profitability is not None and round(pack.cash_based_operating_profitability, 4) == 0.2231
     assert pack.factor_quality_score is not None and pack.factor_quality_score > 70
-    assert pack.factor_forensic_risk_score is not None and pack.factor_forensic_risk_score < 70
+    # Unknown dollar financing must not be replaced by a share-count delta
+    # that artificially dilutes the three observed risk components.
+    assert pack.external_financing_ratio is None
+    assert pack.factor_forensic_risk_score == 73.85
     assert pack.a_his_score is not None and pack.a_his_score > 50
     assert pack.a_his_breakdown is not None
     assert pack.a_his_breakdown["quality_of_earnings"] == 0.95
     assert pack.a_his_breakdown["times_interest_earned"] == 5.2
     assert pack.a_his_breakdown["ocf_covers_capex_and_dividends"] is True
-    assert pack.warnings == []
+    assert pack.warnings == ["external financing unavailable: no validated dollar equity financing input"]
 
 
 def test_build_accounting_factor_pack_flags_partial_history() -> None:

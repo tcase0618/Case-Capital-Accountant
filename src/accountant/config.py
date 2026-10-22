@@ -22,6 +22,9 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://accountant:accountant@127.0.0.1:5432/accountant"
     )
     accountant_env: str = Field(default="development")
+    research_api_token: str = Field(
+        default="", validation_alias=AliasChoices("ACCOUNTANT_RESEARCH_API_TOKEN", "research_api_token")
+    )
     api_token: str = Field(
         default="",
         validation_alias=AliasChoices("ACCOUNTANT_API_TOKEN", "api_token"),

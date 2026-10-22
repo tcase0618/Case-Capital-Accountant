@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CompanyResponse(BaseModel):
@@ -324,6 +324,8 @@ class AccountantIntegrationStatusResponse(BaseModel):
     coverage_pct: float = 0.0
     terminal_handoff_allowed: bool = False
     execution_allowed: bool = False
+    validated_reports: int | None = None
+    validation_coverage_pct: float | None = None
 
 
 class OperatingModeResponse(BaseModel):
@@ -378,6 +380,8 @@ class ResearchPacketResponse(BaseModel):
     research_controls: dict[str, object]
     source_integrity: dict[str, object]
     limitations: list[str]
+    acceptance: dict[str, object] = Field(default_factory=dict)
+    diagnostics: dict[str, object] = Field(default_factory=dict)
 
 
 class DeploymentReadinessResponse(BaseModel):
@@ -406,6 +410,7 @@ class AccountantIntegrationTickerResponse(BaseModel):
     stance: str | None = None
     future_bucket: str | None = None
     data_quality_tier: str | None = None
+    acceptance: dict[str, object] = Field(default_factory=dict)
 
 
 class CompanyReportResponse(BaseModel):

@@ -5,7 +5,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import Select, func, select, text
@@ -54,6 +53,14 @@ from accountant.research.filing_signal_engine import (
     build_governance_signals,
     build_non_gaap_signals,
     build_textual_signals,
+)
+from accountant.research.financial_input_safety import (
+    RULE_VERSION,
+    FinancialSeries,
+    annual_report_inputs,
+    comparable,
+    provenance,
+    select_facts,
 )
 from accountant.research.grading_engine import GradingInputs, ReportCardGradingEngine
 from accountant.research.report_cards import persist_report_card
@@ -1131,8 +1138,12 @@ class ContinuousResearchMachine:
         report.composite_score = 40.0
         report.data_quality_tier = "PARTIAL"
         report.pipeline_stage = "parked" if terminal_reason else _pipeline_stage(raw_facts_count, canonical_count)
+        if raw_facts_count == 0 and canonical_count > 0:
+            report.pipeline_stage = "archive-dependent-incomplete"
         report.latest_filing_date = latest_filing.isoformat() if latest_filing else None
         report.key_stats = {
+            "validation_status": "UNVALIDATED",
+            "archive_dependency": "incomplete_raw_archive_required" if raw_facts_count == 0 else "raw_present",
             "filings_count": filings_count,
             "raw_facts_count": raw_facts_count,
             "canonical_facts_count": canonical_count,
@@ -1180,6 +1191,7 @@ class ContinuousResearchMachine:
             ]
         )
         report.source_versions = {
+            "financial_input_safety": RULE_VERSION,
             "report_machine": "V2_CONTINUOUS_MACHINE_PARTIAL",
             "terminal_reason": terminal_reason or "",
         }
@@ -1205,6 +1217,10 @@ class ContinuousResearchMachine:
         ).scalars().all()
         filings_count = len(filings)
         raw_facts_count = len(facts)
+        # Use reported annual flows only. No quarterly annualization or synthetic TTM.
+        annual_revenue, facts = annual_report_inputs(facts)
+        input_provenance = [provenance(f) for concept in sorted({f.concept for f in facts})
+                            for f in select_facts(facts, [concept], "any")]
         canonical_count = _count(session, CanonicalFact, company.id)
         latest_filing_row = _latest_report_card_filing(filings)
         latest_filing = latest_filing_row.filing_date if latest_filing_row else None
@@ -1240,15 +1256,6 @@ class ContinuousResearchMachine:
             sec_user_agent=get_settings().sec_user_agent,
         )
 
-        revenue_quarterly_series = _series(
-            facts,
-            [
-                "RevenueFromContractWithCustomerExcludingAssessedTax",
-                "Revenues",
-                "SalesRevenueNet",
-            ],
-            period="quarterly",
-        )
         revenue_annual_series = _series(
             facts,
             [
@@ -1258,24 +1265,12 @@ class ContinuousResearchMachine:
             ],
             period="annual",
         )
-        net_income_quarterly_series = _series(facts, ["NetIncomeLoss"], period="quarterly")
-        net_income_annual_series = _series(facts, ["NetIncomeLoss"], period="annual")
         assets_series = _series(facts, ["Assets"], period="instant")
         liabilities_series = _series(facts, ["Liabilities"], period="instant")
         equity_series = _series(
             facts,
             ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
             period="instant",
-        )
-        ocf_quarterly_series = _series(
-            facts,
-            ["NetCashProvidedByUsedInOperatingActivities"],
-            period="quarterly",
-        )
-        ocf_annual_series = _series(
-            facts,
-            ["NetCashProvidedByUsedInOperatingActivities"],
-            period="annual",
         )
         capex_quarterly_series = _series(
             facts,
@@ -1288,31 +1283,36 @@ class ContinuousResearchMachine:
             period="annual",
         )
 
-        revenue = _first_value(revenue_quarterly_series) or _first_value(revenue_annual_series)
-        prior_revenue = _comparable_prior_value(revenue_quarterly_series) or _comparable_prior_value(revenue_annual_series)
-        net_income = _first_value(net_income_quarterly_series) or _first_value(net_income_annual_series)
+        revenue = _first_value(revenue_annual_series)
+        prior_revenue = _comparable_prior_value(revenue_annual_series)
+        # Cross-metric arithmetic requires the same exact duration and end date.
+        current_window = (annual_revenue[0].period_start, annual_revenue[0].period_end) if annual_revenue else None
+        current_facts = [f for f in facts if (f.period_start, f.period_end) == current_window]
+        net_income = _latest_fact_from_concepts(current_facts, ["NetIncomeLoss"], period="annual")
         assets = _first_value(assets_series)
         liabilities = _first_value(liabilities_series)
         equity = _first_value(equity_series)
-        ocf = _first_value(ocf_quarterly_series) or _first_value(ocf_annual_series)
-        capex = _first_value(capex_quarterly_series) or _first_value(capex_annual_series)
+        ocf = _latest_fact_from_concepts(current_facts, ["NetCashProvidedByUsedInOperatingActivities"], period="annual")
+        capex = _latest_fact_from_concepts(current_facts, ["PaymentsToAcquirePropertyPlantAndEquipment"], period="annual")
         diluted_shares = _latest_fact_from_concepts(
-            facts,
+            current_facts,
             [
                 "WeightedAverageNumberOfDilutedSharesOutstanding",
                 "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-                "WeightedAverageNumberOfSharesOutstandingBasic",
-                "CommonStockSharesOutstanding",
             ],
-            period="instant",
+            period="annual",
+        )
+        instant_shares = _latest_fact_from_concepts(
+            [f for f in facts if f.period_end == (current_window[1] if current_window else None)],
+            ["CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"], period="instant",
         )
 
         revenue_growth_pct = _pct_change(revenue, prior_revenue)
         owner_earnings = None
         if ocf is not None and capex is not None:
             owner_earnings = ocf - abs(capex)
-        gross_profit = _latest_fact_from_concepts(facts, ["GrossProfit"])
-        cogs = _latest_fact_from_concepts(facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
+        gross_profit = _latest_fact_from_concepts(current_facts, ["GrossProfit"])
+        cogs = _latest_fact_from_concepts(current_facts, ["CostOfGoodsSold", "CostOfRevenue", "CostOfGoodsAndServicesSold"])
         if gross_profit is None and revenue is not None and cogs is not None:
             gross_profit = revenue - cogs
         gross_margin_pct = _ratio_pct(gross_profit, revenue, ceiling=1000.0)
@@ -1330,7 +1330,7 @@ class ContinuousResearchMachine:
                     "WeightedAverageNumberOfSharesOutstandingBasic",
                     "CommonStockSharesOutstanding",
                 ],
-                period="instant",
+                period="annual",
             )
             prior_shares = _comparable_prior_value(share_series)
             dilution_growth_pct = _pct_change(diluted_shares, prior_shares)
@@ -1362,7 +1362,7 @@ class ContinuousResearchMachine:
 
         leverage_ratio = (liabilities / assets) if liabilities is not None and assets not in (None, 0) else None
         profitability_ratio = (net_income / revenue) if net_income is not None and revenue not in (None, 0) else None
-        balance_score = _clamp(100 - ((leverage_ratio or 0.5) * 100), 0, 100) if leverage_ratio is not None else 45.0
+        balance_score = _clamp(100 - (leverage_ratio * 100), 0, 100) if leverage_ratio is not None else 45.0
         profitability_score = _clamp(((profitability_ratio or 0.0) * 500) + 50, 0, 100) if profitability_ratio is not None else 45.0
         growth_score = _clamp(((revenue_growth_pct or 0.0) * 2) + 50, 0, 100) if revenue_growth_pct is not None else 40.0
         cash_score = 70.0 if owner_earnings and owner_earnings > 0 else 35.0 if owner_earnings is not None else 40.0
@@ -1400,7 +1400,7 @@ class ContinuousResearchMachine:
             2,
         )
         margin_forecast_pct = round(
-            _clamp((net_margin_pct or 6.0) + max(0.0, accounting_quality_score - 62.0) * 0.05, -5.0, 32.0),
+            _clamp((net_margin_pct if net_margin_pct is not None else 6.0) + max(0.0, accounting_quality_score - 62.0) * 0.05, -5.0, 32.0),
             2,
         )
         owner_earnings_forecast = round(
@@ -1426,7 +1426,7 @@ class ContinuousResearchMachine:
             earnings_power=owner_earnings if owner_earnings and owner_earnings > 0 else net_income,
             quality_score=accounting_quality_score,
             growth_pct=revenue_forecast_next_year_pct,
-            share_count=diluted_shares,
+            share_count=instant_shares,
         )
         surprise_score = _expected_surprise_score(
             revenue_growth_pct=revenue_forecast_next_year_pct,
@@ -1529,7 +1529,7 @@ class ContinuousResearchMachine:
             report = CompanyReport(company_id=company.id, ticker=ticker, company_name=company.name, as_of_date=report_as_of.isoformat(), stance=stance)
             session.add(report)
         current_price = _resolved_current_price(ticker, fallback=_safe_float(report.current_price))
-        market_cap = (current_price * diluted_shares) if current_price is not None and diluted_shares is not None else None
+        market_cap = (current_price * instant_shares) if current_price is not None and instant_shares is not None else None
         route = route_company(
             gics_sector=gics_sector,
             sic_description=company.sic_description,
@@ -1549,6 +1549,13 @@ class ContinuousResearchMachine:
         report.latest_filing_date = latest_filing.isoformat() if latest_filing else None
         report.current_price = current_price
         report.key_stats = {
+            "financial_input_rule_version": RULE_VERSION,
+            "financial_input_provenance": input_provenance,
+            "flow_basis": "reported_annual" if current_window else "unavailable",
+            "shares_outstanding": instant_shares,
+            "validation_status": "UNVALIDATED",
+            "validation_reason": "event gates unknown; accounting formulas require independent validation",
+            "archive_dependency": "incomplete_raw_archive_required" if raw_facts_count == 0 else "raw_present",
             "filings_count": filings_count,
             "raw_facts_count": raw_facts_count,
             "canonical_facts_count": canonical_count,
@@ -1793,10 +1800,10 @@ class ContinuousResearchMachine:
                 "auditor_tenure_years": event_signal_bundle.auditor_tenure_years,
                 "auditor_changed_flag": event_signal_bundle.auditor_changed_flag,
                 "auditor_change_date": event_signal_bundle.auditor_change_date,
-                "going_concern_flag": False,
-                "material_weakness_flag": False,
-                "restatement_severity": "little-r" if latest_filing_row and latest_filing_row.is_amendment else "none",
-                "late_filer_flag": False,
+                "going_concern_flag": None,
+                "material_weakness_flag": None,
+                "restatement_severity": "unknown",
+                "late_filer_flag": None,
                 "sec_comment_letter_flag": event_signal_bundle.sec_comment_letter_flag,
                 "cfo_turnover_flag": event_signal_bundle.cfo_turnover_flag,
                 "cfo_turnover_date": event_signal_bundle.cfo_turnover_date,
@@ -1878,7 +1885,7 @@ class ContinuousResearchMachine:
                 beneish_severity=_beneish_severity(factor_pack.beneish_m_score),
                 dechow_severity=None,
                 altman_distress_severity=_altman_severity(factor_pack.altman_z_score),
-                event_flag_severity=95.0 if latest_filing_row and latest_filing_row.is_amendment else 0.0,
+                event_flag_severity=None,
                 forecasted_next_q_pqc=_forecasted_next_q_pqc(
                     current_pqc=factor_pack.factor_quality_score,
                     revenue_forecast_next_year_pct=revenue_forecast_next_year_pct,
@@ -1912,7 +1919,7 @@ class ContinuousResearchMachine:
         governance_ownership = section_payloads["governance_ownership"]
         market_data_linkage = section_payloads["market_data_linkage"]
         universe_tradability = section_payloads["universe_tradability"]
-        final_verdict = {
+        final_verdict: dict[str, Any] = {
             "schema_version": "report_card_v2",
             "pipeline_run_id": f"{company.cik}:{latest_filing_row.accession_number}" if latest_filing_row else company.cik,
             "current_action": grading.action,
@@ -1959,7 +1966,7 @@ class ContinuousResearchMachine:
                 "red_flag_penalty_source": {
                     "beneish_severity": _maybe_round(_beneish_severity(factor_pack.beneish_m_score)),
                     "altman_severity": _maybe_round(_altman_severity(factor_pack.altman_z_score)),
-                    "event_flag_severity": 95.0 if latest_filing_row and latest_filing_row.is_amendment else 0.0,
+                    "event_flag_severity": None,
                     "applied_penalty": _maybe_round(grading.red_flag_penalty),
                 },
                 "forecast_adjustment_source": {
@@ -2008,6 +2015,32 @@ class ContinuousResearchMachine:
             grade_score=grading.grade_score,
             valuation_available=cc_valuation is not None,
         )
+        # Legacy heuristics are diagnostic only; never publish a second actionable score.
+        final_verdict["score_lineage"]["intermediate_scores"]["legacy_composite_score"] = composite_score
+        final_verdict.update({
+            "validation_status": "UNVALIDATED", "grade": "UNVALIDATED",
+            "current_action": "WATCH", "position_size": 0.0,
+            "composite_score": grading.grade_score, "stance": "NEUTRAL",
+            "financial_input_rule_version": RULE_VERSION,
+            "financial_input_provenance": input_provenance,
+        })
+        final_verdict["research_controls"].update({
+            "validation_status": "UNVALIDATED", "actionable": False,
+            "reason": "event gates unknown; formulas not independently validated",
+        })
+        report.composite_score = grading.grade_score
+        report.bullish_score = grading.grade_score
+        report.bearish_score = 100.0 - grading.grade_score
+        report.stance = "NEUTRAL"
+        report.report_markdown = (
+            "# UNVALIDATED - research diagnostics only\n\n"
+            "Event gates are unknown. No actionable grade or position size is approved. "
+            "Any heuristic scores below are legacy diagnostics, not the canonical grade.\n\n"
+            + report.report_markdown
+        )
+        report.pipeline_stage = "unvalidated" if raw_facts_count else "archive-dependent-incomplete"
+        report.key_stats = {**report.key_stats, "canonical_grade": "UNVALIDATED",
+                            "canonical_score": grading.grade_score}
         session.flush()
         persist_report_card(
             session,
@@ -2064,30 +2097,7 @@ def _series(
     *,
     period: str = "any",
 ) -> list[tuple[date | None, float]]:
-    concept_set = set(concepts)
-    best_by_period_end: dict[date | None, tuple[datetime, datetime, datetime, float]] = {}
-    for fact in facts:
-        if fact.concept not in concept_set or fact.value_numeric is None:
-            continue
-        if not _matches_period_kind(fact, period=period):
-            continue
-        period_end = fact.period_end or fact.instant_date
-        filed_at = (
-            datetime.combine(fact.filed_date, datetime.min.time(), tzinfo=UTC)
-            if fact.filed_date is not None
-            else datetime.min.replace(tzinfo=UTC)
-        )
-        candidate = (
-            fact.accepted_at or filed_at,
-            filed_at,
-            fact.created_at or datetime.min.replace(tzinfo=UTC),
-            float(Decimal(fact.value_numeric)),
-        )
-        existing = best_by_period_end.get(period_end)
-        if existing is None or candidate[:3] > existing[:3]:
-            best_by_period_end[period_end] = candidate
-    ordered_periods = sorted(best_by_period_end.keys(), reverse=True)
-    return [(period_end, best_by_period_end[period_end][3]) for period_end in ordered_periods]
+    return FinancialSeries(select_facts(facts, concepts, period))
 
 
 def _first_value(series: list[tuple[date | None, float]]) -> float | None:
@@ -2101,8 +2111,8 @@ def _nth_value(series: list[tuple[date | None, float]], index: int) -> float | N
 def _comparable_prior_index(
     series: list[tuple[date | None, float]],
     *,
-    min_days: int = 300,
-    max_days: int = 430,
+    min_days: int = 350,
+    max_days: int = 380,
 ) -> int | None:
     if not series or series[0][0] is None:
         return None
@@ -2112,6 +2122,8 @@ def _comparable_prior_index(
             continue
         delta_days = (current_period_end - period_end).days
         if min_days <= delta_days <= max_days:
+            if isinstance(series, FinancialSeries) and not comparable(series.source_facts[0], series.source_facts[index]):
+                continue
             return index
     return None
 
@@ -2565,9 +2577,8 @@ def _enrich_report_forecast_fields(session: Session, report: CompanyReport) -> N
     margin_pct = _safe_float(stats.get("margin_pct"))
     assets = _safe_float(stats.get("assets"))
     liabilities = _safe_float(stats.get("liabilities"))
-    diluted_shares = _safe_float(stats.get("weighted_avg_diluted_shares")) or _safe_float(stats.get("shares_outstanding"))
-    if diluted_shares in (None, 0):
-        diluted_shares = _estimate_share_count(session, report)
+    diluted_shares = _safe_float(stats.get("weighted_avg_diluted_shares"))
+    instant_shares = _estimate_share_count(session, report)
     net_income = _safe_float(stats.get("net_income"))
     leverage_ratio = _safe_divide(liabilities, assets)
     balance_score = _clamp(100 - ((leverage_ratio or 0.5) * 100), 0, 100) if leverage_ratio is not None else 45.0
@@ -2597,14 +2608,12 @@ def _enrich_report_forecast_fields(session: Session, report: CompanyReport) -> N
         2,
     ) if owner_earnings is not None else None
     eps = _safe_float(stats.get("eps"))
-    if eps is None and net_income is not None and diluted_shares not in (None, 0):
-        eps = round(net_income / diluted_shares, 2)
     eps_forecast = round(eps * (1 + (revenue_forecast_next_year_pct / 100)), 2) if eps is not None else None
     scenario_valuations = _scenario_valuations(
         earnings_power=owner_earnings if owner_earnings and owner_earnings > 0 else net_income,
         quality_score=quality_score,
         growth_pct=revenue_forecast_next_year_pct,
-        share_count=diluted_shares,
+        share_count=instant_shares,
     )
     surprise_score = _expected_surprise_score(
         revenue_growth_pct=revenue_forecast_next_year_pct,
@@ -2634,7 +2643,7 @@ def _enrich_report_forecast_fields(session: Session, report: CompanyReport) -> N
         {
             "eps": _maybe_round(eps),
             "weighted_avg_diluted_shares": _maybe_round(diluted_shares),
-            "shares_outstanding": _maybe_round(diluted_shares),
+            "shares_outstanding": _maybe_round(instant_shares),
             "eps_forecast": _maybe_round(eps_forecast),
             "revenue_forecast_next_quarter_pct": _maybe_round(revenue_forecast_next_quarter_pct),
             "revenue_forecast_next_year_pct": _maybe_round(revenue_forecast_next_year_pct),
@@ -2714,13 +2723,13 @@ def _scenario_valuations(
     growth_pct: float | None,
     share_count: float | None = None,
 ) -> dict[str, float | None]:
-    if earnings_power is None or earnings_power <= 0:
+    if earnings_power is None or earnings_power <= 0 or share_count is None or share_count <= 0:
         return {"bear": None, "base": None, "bull": None}
     normalized_growth = max(-10.0, min(35.0, growth_pct or 0.0))
     bear_multiple = 6.0 + max(0.0, (quality_score - 55.0) / 18.0)
     base_multiple = 8.5 + max(0.0, (quality_score - 55.0) / 12.0) + max(0.0, normalized_growth / 22.0)
     bull_multiple = 11.0 + max(0.0, (quality_score - 55.0) / 9.0) + max(0.0, normalized_growth / 14.0)
-    divisor = share_count if share_count and share_count > 0 else 1.0
+    divisor = share_count
     return {
         "bear": round((earnings_power * bear_multiple) / divisor, 2),
         "base": round((earnings_power * base_multiple) / divisor, 2),
@@ -2769,6 +2778,8 @@ def _stance_for_score(score: float) -> str:
 
 
 def _pipeline_stage(raw_facts_count: int, canonical_count: int) -> str:
+    if raw_facts_count == 0 and canonical_count > 0:
+        return "archive-dependent-incomplete"
     if canonical_count > 0:
         return "reports-ready"
     if raw_facts_count > 0:

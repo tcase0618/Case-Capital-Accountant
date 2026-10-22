@@ -56,3 +56,36 @@ def test_production_accepts_configured_token(monkeypatch) -> None:
     )
 
     assert auth.require_api_token(_credentials("expected")) == "expected"
+
+
+def test_research_token_is_read_only(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth, "get_settings",
+        lambda: Settings(accountant_env="production", api_token="operator", research_api_token="reader"),
+    )
+    assert auth.require_research_token(_credentials("reader")) == "reader"
+    assert auth.require_research_token(_credentials("operator")) == "operator"
+    with pytest.raises(HTTPException) as error:
+        auth.require_api_token(_credentials("reader"))
+    assert error.value.status_code == 401
+
+
+@pytest.mark.parametrize("supplied", [None, "wrong"])
+def test_production_research_rejects_missing_and_wrong_token(monkeypatch, supplied) -> None:
+    monkeypatch.setattr(
+        auth, "get_settings",
+        lambda: Settings(accountant_env="production", api_token="operator", research_api_token="reader"),
+    )
+    with pytest.raises(HTTPException) as error:
+        auth.require_research_token(_credentials(supplied) if supplied else None)
+    assert error.value.status_code == 401
+
+
+def test_production_research_fails_closed_without_configured_tokens(monkeypatch) -> None:
+    monkeypatch.setattr(
+        auth, "get_settings",
+        lambda: Settings(accountant_env="production", api_token="", research_api_token=""),
+    )
+    with pytest.raises(HTTPException) as error:
+        auth.require_research_token(None)
+    assert error.value.status_code == 503

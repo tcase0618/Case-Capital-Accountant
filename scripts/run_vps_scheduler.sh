@@ -18,6 +18,8 @@ while true; do
   fi
 
   started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  cycle_generation="${started_at//:/}-$$-${RANDOM}"
+  export ACCOUNTANT_CYCLE_SUMMARY_FILE="$status_dir/automation_cycle_${cycle_generation}.json"
   echo "[$started_at] accountant automation cycle starting"
 
   if "$python_bin" scripts/run_accountant_automation.py \
@@ -36,9 +38,22 @@ while true; do
   fi
 
   finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  printf '{"last_cycle_at":"%s","status":"%s","exit_code":%s}\n' \
-    "$finished_at" "$cycle_status" "$cycle_exit_code" > "$status_dir/scheduler_cycle_status.json.partial"
+  # Classify the matching automation JSON, not just its process exit code.
+  if ! "$python_bin" scripts/vps_readiness_check.py --record-cycle \
+    "$status_dir/scheduler_cycle_status.json" "$ACCOUNTANT_CYCLE_SUMMARY_FILE" \
+    "$cycle_exit_code" "$started_at" "$finished_at" "$cycle_generation" \
+    > "$status_dir/scheduler_cycle_status.json.partial" || \
+    [ ! -s "$status_dir/scheduler_cycle_status.json.partial" ]; then
+    # Fail closed even when the status helper itself is unavailable.
+    cycle_status="failed"
+    printf '{"last_cycle_at":"%s","status":"failed","exit_code":%s,"reason":"status_writer_unavailable","generation":"%s","last_success_at":null}\n' \
+      "$finished_at" "$cycle_exit_code" "$cycle_generation" > "$status_dir/scheduler_cycle_status.json.partial"
+  fi
   mv -- "$status_dir/scheduler_cycle_status.json.partial" "$status_dir/scheduler_cycle_status.json"
+  # The generation-specific scratch summary is already persisted in status.
+  # Do not accumulate a second copy on every poll indefinitely.
+  rm -f -- "$ACCOUNTANT_CYCLE_SUMMARY_FILE"
+  cycle_status="$(sed -n 's/.*"status": *"\([^"]*\)".*/\1/p' "$status_dir/scheduler_cycle_status.json")"
   echo "[$finished_at] accountant automation cycle $cycle_status"
   sleep "$active_interval_seconds"
 done

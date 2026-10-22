@@ -10,6 +10,27 @@ from accountant.config import get_settings
 _bearer = HTTPBearer(auto_error=False)
 
 
+def require_research_token(
+    credentials: HTTPAuthorizationCredentials | None = Security(_bearer),  # noqa: B008
+) -> str:
+    """A separate GET-only credential never authorizes mutation endpoints."""
+    settings = get_settings()
+    expected = settings.research_api_token.strip()
+    operator = settings.api_token.strip()
+    allowed = [token for token in (expected, operator) if token]
+    if not allowed:
+        if settings.is_production:
+            raise HTTPException(status_code=503, detail="Research API authentication is not configured.")
+        return "development-no-auth"
+    supplied = credentials.credentials if credentials else ""
+    if not any(hmac.compare_digest(supplied.encode(), token.encode()) for token in allowed):
+        raise HTTPException(
+            status_code=401, detail="Invalid or missing research token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return supplied
+
+
 def require_api_token(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),  # noqa: B008
 ) -> str:

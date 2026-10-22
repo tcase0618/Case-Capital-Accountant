@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
 
 from accountant.db.models import RawFact
+from accountant.research.financial_input_safety import (
+    comparable,
+    duration,
+    provenance,
+    select_facts,
+)
 
 
 @dataclass(frozen=True)
@@ -13,6 +18,7 @@ class FactorPeriod:
     fiscal_period: str
     period_end: date | None
     facts: dict[str, float]
+    source_facts: dict[str, RawFact] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -33,7 +39,8 @@ class AccountingFactorPack:
     a_his_score: float | None
     a_his_breakdown: dict[str, float | bool | str | None] | None
     warnings: list[str]
-    factor_version: str = "ACCOUNTING_FACTOR_PACK_V1"
+    factor_version: str = "ACCOUNTING_FACTOR_PACK_V2_SAFE_INPUTS"
+    input_provenance: list[dict[str, object]] = field(default_factory=list)
 
 
 def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
@@ -61,6 +68,11 @@ def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
 
     current = annual_periods[0]
     prior = annual_periods[1] if len(annual_periods) > 1 else None
+    if prior is not None:
+        current_flow = next((f for f in current.source_facts.values() if duration(f) != 0), None)
+        prior_flow = next((f for f in prior.source_facts.values() if current_flow is not None and f.concept == current_flow.concept), None)
+        if current_flow is None or prior_flow is None or not comparable(current_flow, prior_flow):
+            prior = None
     if prior is None:
         warnings.append("only one annual period available; YoY factors remain partial")
 
@@ -109,31 +121,32 @@ def build_accounting_factor_pack(facts: list[RawFact]) -> AccountingFactorPack:
         factor_forensic_risk_score=_round(factor_forensic_risk_score, 2),
         a_his_score=_round(a_his_score, 2),
         a_his_breakdown=a_his_breakdown,
-        warnings=warnings,
+        warnings=warnings + ["external financing unavailable: no validated dollar equity financing input"],
+        input_provenance=[provenance(f) for p in (current, prior) if p for f in p.source_facts.values()],
     )
 
 
 def _annual_periods(facts: list[RawFact]) -> list[FactorPeriod]:
-    grouped: dict[tuple[int, str, date | None], dict[str, float]] = {}
+    windows: set[tuple[date, date]] = set()
     for fact in facts:
-        if fact.value_numeric is None or fact.fiscal_year is None:
+        days = duration(fact)
+        if (fact.period_start is not None and fact.period_end is not None
+                and days is not None and 350 <= days <= 380
+                and (fact.fiscal_period or "").upper() == "FY"):
+            windows.add((fact.period_start, fact.period_end))
+    periods = []
+    for start, end in sorted(windows, reverse=True):
+        candidates = [f for f in facts if (f.period_start == start and f.period_end == end)
+                      or (duration(f) == 0 and (f.period_end or f.instant_date) == end)]
+        selected = [f for concept in sorted({f.concept for f in candidates})
+                    for f in select_facts(candidates, [concept], "any")]
+        if not any(duration(f) != 0 for f in selected):
             continue
-        fiscal_period = (fact.fiscal_period or "").upper()
-        if fiscal_period and fiscal_period != "FY":
-            continue
-        key = (fact.fiscal_year, fiscal_period or "FY", fact.period_end)
-        bucket = grouped.setdefault(key, {})
-        bucket.setdefault(fact.concept, float(Decimal(fact.value_numeric)))
-
-    periods = [
-        FactorPeriod(
-            fiscal_year=fiscal_year,
-            fiscal_period=fiscal_period,
-            period_end=period_end,
-            facts=period_facts,
-        )
-        for (fiscal_year, fiscal_period, period_end), period_facts in grouped.items()
-    ]
+        periods.append(FactorPeriod(
+            fiscal_year=end.year, fiscal_period="FY", period_end=end,
+            facts={f.concept: float(f.value_numeric) for f in selected if f.value_numeric is not None},
+            source_facts={f.concept: f for f in selected},
+        ))
     periods.sort(key=lambda item: (item.fiscal_year, item.period_end or date.min), reverse=True)
     return periods
 
@@ -565,22 +578,8 @@ def _asset_growth_pct(current: FactorPeriod, prior: FactorPeriod | None) -> floa
 
 
 def _external_financing_ratio(current: FactorPeriod, prior: FactorPeriod | None) -> float | None:
-    if prior is None:
-        return None
-    debt_delta = None
-    shares_delta = None
-    debt_t = _total_debt(current)
-    debt_prev = _total_debt(prior)
-    shares_t = _shares_outstanding(current)
-    shares_prev = _shares_outstanding(prior)
-    if debt_t is not None and debt_prev is not None:
-        debt_delta = debt_t - debt_prev
-    if shares_t is not None and shares_prev is not None:
-        shares_delta = shares_t - shares_prev
-    assets_t = _total_assets(current)
-    assets_prev = _total_assets(prior)
-    average_assets = _avg(assets_t, assets_prev)
-    return _safe_divide((debt_delta or 0.0) + (shares_delta or 0.0), average_assets)
+    # Shares are counts, not dollars. Neither price nor equity proceeds are known.
+    return None
 
 
 def _factor_quality_score(

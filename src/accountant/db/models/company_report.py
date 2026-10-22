@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -39,7 +39,7 @@ class CompanyReport(Base):
     pipeline_stage: Mapped[str] = mapped_column(String(32), nullable=False, default="seeded")
     latest_filing_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
     current_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    key_stats: Mapped[dict[str, float | int | str | None]] = mapped_column(JSON, nullable=False, default={})
+    key_stats: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default={})
     highlights: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=[])
     report_markdown: Mapped[str] = mapped_column(Text, nullable=False, default="")
     source_versions: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False, default={})

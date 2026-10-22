@@ -14,6 +14,7 @@ from accountant.db import create_db_engine, create_session_factory, sqlite_write
 from accountant.db.models import BuyBoardCandidate, BuyBoardSnapshot, CompanyReport, RawFact
 from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
+from accountant.research.financial_input_safety import RULE_VERSION, select_facts
 
 log = get_logger(__name__)
 
@@ -67,8 +68,10 @@ def _pick_price(quote_payload: dict[str, float | None] | None) -> float | None:
 
 def _qualifies_for_buy_board(report: CompanyReport) -> bool:
     stats = report.key_stats or {}
+    if not _validated_report(report):
+        return False
     canonical = int(stats.get("canonical_facts_count") or 0)
-    quality = _safe_float(stats.get("accounting_quality_score")) or report.composite_score
+    quality = _safe_float(stats.get("accounting_quality_score"))
     owner_earnings = _safe_float(stats.get("owner_earnings"))
     net_income = _safe_float(stats.get("net_income"))
     revenue_growth = _safe_float(stats.get("revenue_growth_pct")) or 0.0
@@ -77,9 +80,20 @@ def _qualifies_for_buy_board(report: CompanyReport) -> bool:
         and report.composite_score >= 70
         and (report.data_quality_tier or "").upper() == "ADEQUATE"
         and canonical > 0
-        and quality >= 60
+        and quality is not None and quality >= 60
         and revenue_growth > 0
         and any(value is not None and value > 0 for value in (owner_earnings, net_income))
+    )
+
+
+def _validated_report(report: CompanyReport) -> bool:
+    stats = report.key_stats or {}
+    return (
+        stats.get("validation_status") == "VALIDATED"
+        and stats.get("financial_input_rule_version") == RULE_VERSION
+        and stats.get("canonical_grade") in {"A", "B", "C", "D", "F"}
+        and _safe_float(stats.get("canonical_score")) == report.composite_score
+        and int(stats.get("raw_facts_count") or 0) > 0
     )
 
 
@@ -87,8 +101,6 @@ def _estimate_share_count(session: Session, report: CompanyReport) -> float | No
     stats = report.key_stats or {}
     for key in (
         "shares_outstanding",
-        "weighted_avg_diluted_shares",
-        "weighted_avg_basic_shares",
     ):
         shares = _safe_float(stats.get(key))
         if shares is not None and shares > 0:
@@ -99,9 +111,6 @@ def _estimate_share_count(session: Session, report: CompanyReport) -> float | No
         [
             "CommonStockSharesOutstanding",
             "EntityCommonStockSharesOutstanding",
-            "WeightedAverageNumberOfDilutedSharesOutstanding",
-            "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-            "WeightedAverageNumberOfSharesOutstandingBasic",
         ],
     )
     if shares is None or shares <= 0:
@@ -113,15 +122,13 @@ def _estimate_cc_valuation(session: Session, report: CompanyReport) -> float | N
     stats = report.key_stats or {}
     owner_earnings = _safe_float(stats.get("owner_earnings"))
     net_income = _safe_float(stats.get("net_income"))
-    equity = _safe_float(stats.get("equity"))
     growth_pct = _safe_float(stats.get("revenue_growth_pct")) or 0.0
-    quality = _safe_float(stats.get("accounting_quality_score")) or report.composite_score
+    quality = _safe_float(stats.get("accounting_quality_score"))
+    if quality is None or stats.get("flow_basis") != "reported_annual":
+        return None
     earnings_power = owner_earnings if owner_earnings and owner_earnings > 0 else net_income
     if earnings_power is None or earnings_power <= 0:
-        if equity and equity > 0:
-            earnings_power = equity * 0.08
-        else:
-            return None
+        return None
     share_count = _estimate_share_count(session, report)
     if share_count is None or share_count <= 0:
         return None
@@ -157,15 +164,15 @@ def _latest_fact_value(session: Session, company_id, concepts: list[str]) -> flo
     order_by = [RawFact.period_end.desc(), RawFact.filed_date.desc().nullslast(), RawFact.created_at.desc()]
     if _raw_facts_has_accepted_at(str(bind.url)):
         order_by.insert(1, RawFact.accepted_at.desc().nullslast())
-    value = session.execute(
-        select(RawFact.value_numeric)
+    facts = session.execute(
+        select(RawFact)
         .where(RawFact.company_id == company_id, RawFact.concept.in_(concepts), RawFact.value_numeric.is_not(None))
         .order_by(*order_by)
-        .limit(1)
-    ).scalar_one_or_none()
-    if value is None:
-        return None
-    return float(value)
+    ).scalars().all()
+    period = "instant" if all("CommonStockSharesOutstanding" in c for c in concepts) else "annual"
+    selected = select_facts(list(facts), concepts, period)
+    value = selected[0].value_numeric if selected else None
+    return float(value) if value is not None else None
 
 
 def _estimate_eps(session: Session, report: CompanyReport) -> float | None:
@@ -183,22 +190,8 @@ def _estimate_eps(session: Session, report: CompanyReport) -> float | None:
     if direct_eps is not None:
         return round(direct_eps, 2)
 
-    net_income = _safe_float(stats.get("net_income"))
-    shares = _safe_float(stats.get("weighted_avg_diluted_shares")) or _safe_float(stats.get("weighted_avg_basic_shares"))
-    if shares is None:
-        shares = _latest_fact_value(
-            session,
-            report.company_id,
-            [
-                "WeightedAverageNumberOfDilutedSharesOutstanding",
-                "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
-                "WeightedAverageNumberOfSharesOutstandingBasic",
-                "CommonStockSharesOutstanding",
-            ],
-        )
-    if net_income is None or shares in (None, 0):
-        return None
-    return round(net_income / shares, 2)
+    # Unpaired net income and share counts have no verified common duration.
+    return None
 
 
 def _estimate_eps_forecast(eps: float | None, growth_forecast_pct: float) -> float | None:
@@ -529,6 +522,8 @@ def future_upside_candidates(session: Session, limit: int = 24) -> list[dict[str
     ranked: list[dict[str, object]] = []
     for report in reports:
         stats = report.key_stats or {}
+        if not _validated_report(report):
+            continue
         if stats.get("future_bucket") != "FUTURE":
             continue
         surprise = _safe_float(stats.get("surprise_score"))

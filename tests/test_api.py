@@ -295,7 +295,17 @@ def test_company_filings_include_documents(test_session) -> None:
     assert payload[0]["accepted_at"] == "2025-11-01T16:30:00"
 
 
-def test_accountant_integration_status_and_ticker_endpoint(test_session) -> None:
+def test_accountant_integration_status_and_ticker_endpoint(test_session, monkeypatch) -> None:
+    settings = api_app.get_settings().model_copy(update={"machine_enabled": True})
+    monkeypatch.setattr(api_app, "get_settings", lambda: settings)
+    monkeypatch.setattr(api_app, "operating_mode_payload", lambda _: {
+        "mode": "connected_research", "terminal_handoff_allowed": True,
+        "research_only": True, "execution_allowed": False,
+    })
+    monkeypatch.setattr(api_app.MACHINE, "snapshot", lambda: {})
+    monkeypatch.setattr(api_app, "build_source_integrity_snapshot", lambda _: {
+        "source_grade": "STRONG", "sec": {"latest_filing_date": date.today().isoformat()},
+    })
     company = _seed_company_with_filings_and_facts(test_session)
     report = CompanyReport(
         id=uuid.uuid4(),
@@ -353,6 +363,8 @@ def test_accountant_integration_status_and_ticker_endpoint(test_session) -> None
     integration_payload = integration_response.json()
     assert integration_payload["companies_with_reports"] >= 1
     assert integration_payload["companies_with_report_cards"] >= 1
+    assert integration_payload["validated_reports"] == 0
+    assert integration_payload["ready_for_readonly_integration"] is False
 
     assert ticker_response.status_code == 200
     ticker_payload = ticker_response.json()
@@ -360,7 +372,9 @@ def test_accountant_integration_status_and_ticker_endpoint(test_session) -> None
     assert ticker_payload["report_available"] is True
     assert ticker_payload["report_card_available"] is True
     assert ticker_payload["pipeline_stage"] == "reports-ready"
-    assert ticker_payload["ready_for_readonly_integration"] is True
+    assert ticker_payload["ready_for_readonly_integration"] is False
+    assert ticker_payload["acceptance"]["accepted"] is False
+    assert ticker_payload["stance"] is None
 
 
 def test_sector_endpoints_expose_profiles_bottlenecks_and_laggers(test_session) -> None:
@@ -695,7 +709,9 @@ def test_get_latest_report_card_exposes_lineage_and_identity_metadata(test_sessi
     assert ftm_response.status_code == 200
     assert ftm_response.json()["version"] == "FTM_MARKET_CAP_MAP_V1"
     assert packet_response.status_code == 200
-    assert packet_response.json()["packet_version"] == "ACCOUNTANT_RESEARCH_PACKET_V1"
+    assert packet_response.json()["packet_version"] == "ACCOUNTANT_RESEARCH_PACKET_V2"
+    assert packet_response.json()["acceptance"]["accepted"] is False
+    assert packet_response.json()["report_card"] is None
     assert packet_response.json()["execution_allowed"] is False
     assert readiness_response.status_code == 200
     assert readiness_response.json()["ready_for_next_phase"] is False

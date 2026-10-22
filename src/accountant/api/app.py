@@ -18,7 +18,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from accountant.analysis.point_in_time_engine import PointInTimeResolver
-from accountant.api.auth import require_api_token
+from accountant.api.auth import require_api_token, require_research_token
 from accountant.api.schemas import (
     AccountantIntegrationStatusResponse,
     AccountantIntegrationTickerResponse,
@@ -98,6 +98,7 @@ from accountant.research.cache_warmer import CACHE_WARMER
 from accountant.research.change_timeline import build_company_change_timeline
 from accountant.research.ftm import ftm_overview, ftm_sector
 from accountant.research.operating_mode import operating_mode_payload
+from accountant.research.packet_acceptance import PACKET_VERSION, evaluate_packet_acceptance
 from accountant.research.paper_book import launch_lane1_paper_book
 from accountant.research.report_cards import latest_report_card_for_ticker, latest_report_cards
 from accountant.research.report_machine import MACHINE
@@ -1333,7 +1334,7 @@ def get_operating_mode() -> OperatingModeResponse:
     return OperatingModeResponse(**operating_mode_payload(get_settings()))
 
 
-@app.get("/api/research-packets/{ticker}", response_model=ResearchPacketResponse)
+@app.get("/api/research-packets/{ticker}", response_model=ResearchPacketResponse, dependencies=[Depends(require_research_token)])
 def get_research_packet(ticker: str, session: SessionDep) -> ResearchPacketResponse:
     company, resolved_ticker = _get_company_or_404(session, ticker)
     report = _latest_report_for_company(session, company.id)
@@ -1370,8 +1371,12 @@ def get_research_packet(ticker: str, session: SessionDep) -> ResearchPacketRespo
             valuation_available=bool(dict(card.final_verdict or {}).get("valuation_snapshot", {}).get("cc_valuation")),
         )
     source = build_source_integrity_snapshot(session)
+    acceptance = evaluate_packet_acceptance(
+        ticker=resolved_ticker, report=report, card=card, mode=mode,
+        source=source, storage_blocked=bool(MACHINE.snapshot().get("storage_blocked")),
+    )
     return ResearchPacketResponse(
-        packet_version="ACCOUNTANT_RESEARCH_PACKET_V1",
+        packet_version=PACKET_VERSION,
         packet_id=card.report_card_id if card else f"{resolved_ticker}:NO_REPORT_CARD",
         generated_at=datetime.now(UTC).isoformat(),
         operating_mode=mode,
@@ -1379,9 +1384,19 @@ def get_research_packet(ticker: str, session: SessionDep) -> ResearchPacketRespo
         company_name=company.name,
         research_only=True,
         execution_allowed=False,
-        report=report_response,
-        report_card=_report_card_response(card) if card else None,
-        research_controls=controls,
+        report=report_response if acceptance["accepted"] else None,
+        report_card=_report_card_response(card) if acceptance["accepted"] and card else None,
+        acceptance=acceptance,
+        diagnostics={
+            "report_available": report is not None,
+            "report_card_available": card is not None,
+            "pipeline_stage": report.pipeline_stage if report else "missing_report",
+            "data_quality_tier": report.data_quality_tier if report else None,
+        },
+        research_controls=controls if acceptance["accepted"] else {
+            "approval_state": "UNVALIDATED", "qa_status": "UNVERIFIED",
+            "execution_authority": "NONE", "reasons": acceptance["reasons"],
+        },
         source_integrity=source,
         limitations=[
             "This packet is research-only and cannot submit, route, or manage orders.",
@@ -1725,7 +1740,7 @@ def report_machine_status() -> ReportMachineStatusResponse:
     return ReportMachineStatusResponse(**MACHINE.snapshot())
 
 
-@app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse)
+@app.get("/api/integration/accountant", response_model=AccountantIntegrationStatusResponse, dependencies=[Depends(require_research_token)])
 def accountant_integration_status(session: SessionDep) -> AccountantIntegrationStatusResponse:
     machine = MACHINE.snapshot()
     settings = get_settings()
@@ -1757,6 +1772,31 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         and companies_with_report_cards > 0
         and coverage_pct >= 95.0
     )
+    source = build_source_integrity_snapshot(session)
+    ready = ready and not machine.get("storage_blocked") and source.get("source_grade") in {"STRONG", "WATCH"}
+    validated_reports = None
+    validation_coverage_pct = None
+    if ready:
+        # Historical row counts cannot establish publication readiness. Check
+        # the current card/report pair, never an old validated predecessor.
+        latest_card_id = (
+            select(ReportCard.id)
+            .where(ReportCard.company_id == CompanyReport.company_id)
+            .order_by(ReportCard.accepted_at.desc(), ReportCard.filed_date.desc(), ReportCard.created_at.desc())
+            .correlate(CompanyReport).limit(1).scalar_subquery()
+        )
+        pairs = session.execute(
+            select(CompanyReport, ReportCard).join(ReportCard, ReportCard.id == latest_card_id)
+        )
+        validated_reports = sum(
+            evaluate_packet_acceptance(
+                ticker=report.ticker, report=report, card=card, mode=mode,
+                source=source, storage_blocked=False,
+            )["accepted"]
+            for report, card in pairs
+        )
+        validation_coverage_pct = round(100 * validated_reports / total_companies, 2) if total_companies else 0.0
+        ready = validation_coverage_pct >= 95.0
     if not settings.machine_enabled:
         completion_state = "paused"
     elif int(machine.get("blocked_companies") or 0) > 0:
@@ -1788,10 +1828,12 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         coverage_pct=coverage_pct,
         terminal_handoff_allowed=bool(mode["terminal_handoff_allowed"]),
         execution_allowed=False,
+        validated_reports=validated_reports,
+        validation_coverage_pct=validation_coverage_pct,
     )
 
 
-@app.get("/api/integration/accountant/{ticker}", response_model=AccountantIntegrationTickerResponse)
+@app.get("/api/integration/accountant/{ticker}", response_model=AccountantIntegrationTickerResponse, dependencies=[Depends(require_research_token)])
 def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> AccountantIntegrationTickerResponse:
     company, resolved_ticker = _get_company_or_404(session, ticker)
     report = _latest_report_for_company(session, company.id)
@@ -1800,12 +1842,13 @@ def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> Ac
     statement_snapshots_count = _count_for_company(session, StatementSnapshot, company.id)
     report_available = report is not None
     report_card_available = report_card is not None
-    ready = (
-        report_available
-        and report_card_available
-        and report is not None
-        and report.pipeline_stage == "reports-ready"
+    acceptance = evaluate_packet_acceptance(
+        ticker=resolved_ticker, report=report, card=report_card,
+        mode=operating_mode_payload(get_settings()),
+        source=build_source_integrity_snapshot(session),
+        storage_blocked=bool(MACHINE.snapshot().get("storage_blocked")),
     )
+    ready = acceptance["accepted"]
     future_bucket = None
     if report is not None and isinstance(report.key_stats, dict):
         future_bucket = report.key_stats.get("future_bucket")
@@ -1822,9 +1865,10 @@ def accountant_integration_ticker_status(ticker: str, session: SessionDep) -> Ac
         latest_report_date=report.as_of_date if report is not None else None,
         latest_report_card_filed_date=report_card.filed_date.isoformat() if report_card is not None else None,
         latest_report_updated_at=report.updated_at.isoformat() if report is not None and report.updated_at else None,
-        stance=report.stance if report is not None else None,
-        future_bucket=str(future_bucket) if future_bucket is not None else None,
+        stance=report.stance if ready and report is not None else None,
+        future_bucket=str(future_bucket) if ready and future_bucket is not None else None,
         data_quality_tier=report.data_quality_tier if report is not None else None,
+        acceptance=acceptance,
     )
 
 

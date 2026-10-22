@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -108,6 +109,7 @@ def main() -> int:
     )
     if not preflight.allowed:
         payload = {
+            "status": "paused_storage",
             "run_id": run_id,
             "generated_at": datetime.now(UTC).isoformat(),
             "before": before,
@@ -124,6 +126,7 @@ def main() -> int:
             "bottlenecks": {},
         }
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _publish_scheduler_summary(payload)
         print(json.dumps(payload, indent=2), flush=True)
         # This is a controlled pause, not a failed ingestion or corrupt database.
         return 0
@@ -187,6 +190,7 @@ def main() -> int:
     bottleneck_summary = _write_company_bottlenecks(dsn, run_id=run_id)
     readiness = _readiness_snapshot(dsn, stale_core_report_cards=_remaining_stale_from_logs(steps))
     payload = {
+        "status": "failed" if any(step.returncode != 0 for step in steps) else "complete",
         "run_id": run_id,
         "generated_at": datetime.now(UTC).isoformat(),
         "before": before,
@@ -212,8 +216,18 @@ def main() -> int:
         "bottlenecks": bottleneck_summary,
     }
     summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _publish_scheduler_summary(payload)
     print(json.dumps(payload, indent=2), flush=True)
     return 1 if any(step.returncode != 0 for step in steps) else 0
+
+
+def _publish_scheduler_summary(payload: dict[str, Any]) -> None:
+    target = os.environ.get("ACCOUNTANT_CYCLE_SUMMARY_FILE")
+    if target:
+        path = Path(target)
+        partial = path.with_suffix(path.suffix + ".partial")
+        partial.write_text(json.dumps(payload), encoding="utf-8")
+        partial.replace(path)
 
 
 def _parse_args() -> argparse.Namespace:

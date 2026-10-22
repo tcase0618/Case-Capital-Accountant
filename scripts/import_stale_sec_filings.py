@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import re
 import threading
-from collections import Counter, deque
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
 
 import httpx
 from sqlalchemy import func, select
@@ -15,10 +15,21 @@ from accountant.db import create_db_engine, create_session_factory, sqlite_write
 from accountant.db.models import Company, Filing, Security
 from accountant.ingest.filings import FilingFetchPayload, ingest_company_filings_payload
 from accountant.sec import SecClient
+from accountant.sec.discovery_state import DiscoveryState, checkpoint_lock
 from accountant.sec.rate_limit import RateLimiter
 
-
-CORE_REPORT_FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "20-F", "20-F/A", "40-F", "40-F/A", "6-K", "6-K/A"}
+CORE_REPORT_FORMS = {
+    "10-K",
+    "10-K/A",
+    "10-Q",
+    "10-Q/A",
+    "20-F",
+    "20-F/A",
+    "40-F",
+    "40-F/A",
+    "6-K",
+    "6-K/A",
+}
 USEFUL_FORMS = CORE_REPORT_FORMS | {
     "8-K",
     "8-K/A",
@@ -69,50 +80,107 @@ class ImportCounters:
     errors: int = 0
 
 
-def main() -> None:
+def main() -> int:
     args = _parse_args()
     engine = create_db_engine()
     factory = create_session_factory(engine)
     settings = get_settings()
     today = date.today()
-    from_date = _parse_date_arg(args.from_date) or _next_day_after_latest_filing(factory)
-    to_date = _parse_date_arg(args.to_date) or today
-    if from_date > to_date:
-        print(f"no import needed from_date={from_date.isoformat()} to_date={to_date.isoformat()}", flush=True)
-        return
+    try:
+        path = settings.data_dir / f"sec_discovery_{args.forms}.json"
+        with checkpoint_lock(path):
+            state = DiscoveryState(path)
+            return _run_discovery(factory, state, args, today)
+    finally:
+        engine.dispose()
 
-    universe = _load_universe(factory)
-    forms = _selected_forms(args.forms)
-    matched = _load_matching_daily_index_filings(from_date, to_date, universe, forms=forms)
-    affected_ciks = sorted({row.cik for row in matched})
-    if args.limit:
-        affected_ciks = affected_ciks[: max(0, args.limit)]
-    form_counts = Counter(row.form_type for row in matched)
-    print(
-        f"[{datetime.now(UTC).isoformat()}] stale SEC import starting "
-        f"from={from_date.isoformat()} to={to_date.isoformat()} "
-        f"index_matches={len(matched)} affected_companies={len(affected_ciks)} "
-        f"forms={','.join(f'{form}:{count}' for form, count in form_counts.most_common(12))}",
-        flush=True,
+
+def _run_discovery(factory, state, args, today) -> int:
+    settings = get_settings()
+    dates = state.dates(
+        today, _parse_date_arg(args.from_date), _parse_date_arg(args.to_date) or today
     )
-
+    universe = _load_universe(factory)
     counters = ImportCounters()
+    matched = []
+    for day in dates:
+        entry = state.entry(day)
+        entry["attempts"] += 1
+        entry["ok"] = False
+        state.save(today)
+        try:
+            rows = _load_matching_daily_index_filings(
+                day, day, universe, forms=_selected_forms(args.forms)
+            )
+            for row in rows:
+                accession = _index_accession(row.filename)
+                if accession not in entry["done"].get(row.cik, []):
+                    pending = entry["pending"].setdefault(row.cik, [])
+                    if accession not in pending:
+                        pending.append(accession)
+            entry["ok"] = True
+            matched.extend(rows)
+        except Exception as exc:
+            counters.errors += 1
+            print(f"daily-index failed date={day} error={str(exc)[:160]}", flush=True)
+        state.save(today)
+
+    expected: dict[str, set[str]] = {}
+    for day, entry in state.days.items():
+        if date.fromisoformat(day) > today:
+            raise ValueError("future date in checkpoint")
+        for cik, accessions in entry["pending"].items():
+            expected.setdefault(cik, set()).update(accessions)
+    attempts = state.data.setdefault("company_attempts", {})
+    affected = sorted(expected, key=lambda cik: (attempts.get(cik, 0), cik))
+    if args.limit is not None:
+        affected = affected[: max(0, args.limit)]
+    state.data["company_attempts"] = {
+        cik: attempts.get(cik, 0) + int(cik in affected) for cik in expected
+    }
+    state.save(today)
+    # All checkpoint writes are serialized, including worker completion callbacks.
+    state_lock = threading.Lock()
+
+    def completed(cik):
+        with state_lock:
+            for entry in state.days.values():
+                accessions = entry["pending"].pop(cik, [])
+                if accessions:
+                    entry["done"][cik] = sorted(set(entry["done"].get(cik, [])) | set(accessions))
+            state.data["company_attempts"].pop(cik, None)
+            state.save(today)
+
     _import_affected_submissions(
         factory,
-        affected_ciks,
+        affected,
         universe,
         workers=args.workers,
         counters=counters,
         min_interval_seconds=settings.sec_min_interval_seconds,
+        expected=expected,
+        completed=completed,
     )
     _print_summary(factory, counters, matched)
-    engine.dispose()
+    failed_indexes = sum(not e["ok"] for e in state.days.values())
+    pending_companies = sum(len(e["pending"]) for e in state.days.values())
+    partial = bool(counters.errors or failed_indexes or pending_companies)
+    print(
+        f"discovery status={'PARTIAL' if partial else 'SUCCESS'} "
+        f"failed_indexes={failed_indexes} pending_company_dates={pending_companies}",
+        flush=True,
+    )
+    return int(partial)
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Import stale SEC filings for universe companies from daily indexes.")
+    parser = argparse.ArgumentParser(
+        description="Import stale SEC filings for universe companies from daily indexes."
+    )
     parser.add_argument("--from-date", help="First SEC filing date to inspect, YYYY-MM-DD.")
-    parser.add_argument("--to-date", help="Last SEC filing date to inspect, YYYY-MM-DD. Defaults to today.")
+    parser.add_argument(
+        "--to-date", help="Last SEC filing date to inspect, YYYY-MM-DD. Defaults to today."
+    )
     parser.add_argument("--workers", type=int, default=8, help="Parallel SEC submissions workers.")
     parser.add_argument("--limit", type=int, help="Limit affected companies, for smoke tests.")
     parser.add_argument(
@@ -130,17 +198,6 @@ def _parse_date_arg(value: str | None) -> date | None:
     return date.fromisoformat(value)
 
 
-def _next_day_after_latest_filing(factory) -> date:
-    session = factory()
-    try:
-        latest = session.execute(select(func.max(Filing.filing_date))).scalar_one_or_none()
-        if latest is None:
-            return date.today() - timedelta(days=30)
-        return latest + timedelta(days=1)
-    finally:
-        session.close()
-
-
 def _load_universe(factory) -> dict[str, dict[str, str]]:
     session = factory()
     try:
@@ -153,7 +210,9 @@ def _load_universe(factory) -> dict[str, dict[str, str]]:
         for cik, name, ticker in rows:
             if not cik or not ticker:
                 continue
-            universe.setdefault(str(cik).zfill(10), {"ticker": str(ticker).upper(), "name": str(name or ticker)})
+            universe.setdefault(
+                str(cik).zfill(10), {"ticker": str(ticker).upper(), "name": str(name or ticker)}
+            )
         return universe
     finally:
         session.close()
@@ -181,21 +240,22 @@ def _load_matching_daily_index_filings(
         "Accept": "text/plain,*/*",
     }
     rows: list[IndexFiling] = []
-    with httpx.Client(timeout=httpx.Timeout(settings.sec_timeout_seconds), headers=headers, follow_redirects=True) as client:
+    with httpx.Client(
+        timeout=httpx.Timeout(settings.sec_timeout_seconds), headers=headers, follow_redirects=True
+    ) as client:
         current = from_date
         while current <= to_date:
             url = _daily_master_url(current)
             try:
                 response = client.get(url)
-                if response.status_code in {403, 404}:
-                    current += timedelta(days=1)
-                    continue
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                print(f"daily-index skip date={current.isoformat()} error={str(exc)[:160]}", flush=True)
-                current += timedelta(days=1)
-                continue
+                raise RuntimeError(f"daily index unavailable: {current}") from exc
+            if "CIK|Company Name|Form Type|Date Filed|Filename" not in response.text:
+                raise ValueError(f"invalid daily index: {current}")
             for row in _parse_master_idx(response.text):
+                if row.filing_date != current or row.filing_date > date.today():
+                    raise ValueError(f"invalid filing date in index: {row.filing_date}")
                 if row.cik not in universe:
                     continue
                 if forms is not None and row.form_type not in forms:
@@ -217,14 +277,12 @@ def _parse_master_idx(text: str) -> list[IndexFiling]:
             continue
         parts = line.split("|")
         if len(parts) != 5:
-            continue
+            raise ValueError("malformed daily index row")
         cik_raw, company_name, form_type, filed_raw, filename = [part.strip() for part in parts]
         if not cik_raw.isdigit():
-            continue
-        try:
-            filed = date.fromisoformat(filed_raw)
-        except ValueError:
-            continue
+            raise ValueError("invalid daily index CIK")
+        filed = date.fromisoformat(filed_raw)
+        _index_accession(filename)
         rows.append(
             IndexFiling(
                 cik=cik_raw.zfill(10),
@@ -237,6 +295,40 @@ def _parse_master_idx(text: str) -> list[IndexFiling]:
     return rows
 
 
+def _index_accession(filename: str) -> str:
+    match = re.search(r"/(\d{10}-\d{2}-\d{6})\.txt$", filename)
+    if not match:
+        raise ValueError("invalid index accession filename")
+    return match.group(1)
+
+
+def _existing_accessions(factory, cik, expected):
+    with factory() as session:
+        return set(
+            session.execute(
+                select(Filing.accession_number)
+                .join(Company, Company.id == Filing.company_id)
+                .where(Company.cik == cik, Filing.accession_number.in_(expected))
+            ).scalars()
+        )
+
+
+def _required_shards(client, submissions, missing):
+    recent = submissions.get("filings", {}).get("recent", {})
+    missing = set(missing) - set(recent.get("accessionNumber", []))
+    shards = []
+    if missing:
+        for entry in submissions.get("filings", {}).get("files", []):
+            shard = client.get_submissions_file(entry["name"])
+            shards.append(shard)
+            missing -= set(shard.get("accessionNumber", []))
+            if not missing:
+                break
+    if missing:
+        raise ValueError(f"submissions missing {len(missing)} discovered accessions")
+    return shards
+
+
 def _import_affected_submissions(
     factory,
     affected_ciks: list[str],
@@ -245,7 +337,11 @@ def _import_affected_submissions(
     workers: int,
     counters: ImportCounters,
     min_interval_seconds: float,
+    expected: dict[str, set[str]],
+    completed,
 ) -> None:
+    if not affected_ciks:
+        return
     queue = deque(affected_ciks)
     queue_lock = threading.Lock()
     counter_lock = threading.Lock()
@@ -260,19 +356,30 @@ def _import_affected_submissions(
                     if not queue:
                         return
                     cik = queue.popleft()
-                info = universe[cik]
+                info = universe.get(cik, {"ticker": "", "name": cik})
                 session = factory()
                 try:
+                    missing = expected[cik] - _existing_accessions(factory, cik, expected[cik])
+                    if not missing:
+                        completed(cik)
+                        continue
+                    if cik not in universe:
+                        raise ValueError("pending company no longer in universe")
                     submissions = sec_client.get_submissions(cik)
+                    if str(submissions.get("cik", "")).zfill(10) != cik:
+                        raise ValueError("submissions CIK does not match discovered company")
                     payload = FilingFetchPayload(
                         resolution_ticker=info["ticker"],
                         resolution_name=info["name"],
                         submissions=submissions,
-                        historical_shards=[],
+                        historical_shards=_required_shards(sec_client, submissions, missing),
                     )
                     with sqlite_write_guard():
                         result = ingest_company_filings_payload(session, payload)
                         session.commit()
+                    if expected[cik] - _existing_accessions(factory, cik, expected[cik]):
+                        raise ValueError("committed filings do not cover discovered accessions")
+                    completed(cik)
                     with counter_lock:
                         counters.companies_processed += 1
                         counters.filings_inserted += result.inserted
@@ -300,7 +407,9 @@ def _import_affected_submissions(
                     session.close()
 
     threads = [
-        threading.Thread(target=_worker, args=(index + 1,), daemon=True, name=f"stale-sec-import-{index + 1}")
+        threading.Thread(
+            target=_worker, args=(index + 1,), daemon=True, name=f"stale-sec-import-{index + 1}"
+        )
         for index in range(max(1, workers))
     ]
     for thread in threads:
@@ -327,4 +436,4 @@ def _print_summary(factory, counters: ImportCounters, matched: list[IndexFiling]
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
