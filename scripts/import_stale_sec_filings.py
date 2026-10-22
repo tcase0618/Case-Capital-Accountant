@@ -253,7 +253,10 @@ def _load_matching_daily_index_filings(
                 response.raise_for_status()
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"daily index unavailable: {current}") from exc
-            if "CIK|Company Name|Form Type|Date Filed|Filename" not in response.text:
+            # SEC's live feed uses "File Name"; older copies use "Filename".
+            # Ignore header whitespace, not column order or content.
+            headers_seen = {"".join(line.split()).casefold() for line in response.text.splitlines()}
+            if "cik|companyname|formtype|datefiled|filename" not in headers_seen:
                 raise ValueError(f"invalid daily index: {current}")
             for row in _parse_master_idx(response.text):
                 if row.filing_date != current or row.filing_date > date.today():

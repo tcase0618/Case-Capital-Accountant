@@ -49,6 +49,29 @@ def test_each_company_admission_honors_storage_reserve(tmp_path, monkeypatch):
         importer._require_storage_headroom(session)
 
 
+@pytest.mark.parametrize("filename_header", ["File Name", "Filename"])
+def test_real_edgar_header_and_compact_date_are_accepted(monkeypatch, filename_header):
+    # Shape observed in the official October 21 daily dissemination feed.
+    body = (
+        "Description: Daily Index of EDGAR Dissemination Feed\n"
+        f"CIK|Company Name|Form Type|Date Filed|{filename_header}\n"
+        "----------------------------------------------------------------\n"
+        f"1|One|10-K|20261020|edgar/data/1/{A}.txt\n"
+    )
+    monkeypatch.setattr(importer, "get_settings", lambda: SimpleNamespace(
+        sec_user_agent="Case Capital offline test test@example.com", sec_timeout_seconds=5,
+    ))
+    monkeypatch.setattr(httpx.Client, "get", lambda *a, **k: httpx.Response(
+        200, text=body, request=httpx.Request("GET", "https://www.sec.gov/test.idx"),
+    ))
+    rows = importer._load_matching_daily_index_filings(
+        DAY, DAY, {CIK: {"ticker": "ONE"}}, forms={"10-K"},
+    )
+    assert len(rows) == 1
+    assert rows[0].filing_date == DAY
+    assert rows[0].cik == CIK
+
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     def forbidden(*args, **kwargs):
