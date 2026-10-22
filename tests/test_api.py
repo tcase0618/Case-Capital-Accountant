@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import accountant.api.app as api_app
 from accountant.api.app import app, get_session
 from accountant.db.models import (
+    BuyBoardCandidate,
     Company,
     CompanyBottleneckSnapshot,
     CompanyReport,
@@ -40,6 +41,22 @@ def test_operating_mode_is_research_only_by_default() -> None:
     assert payload["research_only"] is True
     assert payload["execution_allowed"] is False
     assert payload["terminal_handoff_allowed"] is False
+
+
+def test_legacy_active_buy_cache_is_not_published_as_validated(test_session):
+    company = _seed_company_with_filings_and_facts(test_session)
+    candidate = BuyBoardCandidate(
+        company_id=company.id, ticker="AAPL", company_name=company.name, status="ACTIVE",
+    )
+    report = CompanyReport(
+        company_id=company.id, ticker="AAPL", company_name=company.name,
+        as_of_date="2026-10-21", stance="BULLISH", composite_score=95,
+        pipeline_stage="reports-ready", data_quality_tier="ADEQUATE", key_stats={},
+    )
+    test_session.add_all([candidate, report])
+    test_session.commit()
+    assert api_app.list_buy_board(test_session) == []
+    assert candidate.status == "ACTIVE"  # Read-side quarantine never rewrites history.
 
 
 def test_report_card_anchor_ignores_ownership_forms() -> None:

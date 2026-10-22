@@ -71,3 +71,34 @@ restore; capacity-safe SEC catch-up; independently reconciled representative
 financial samples and disclosure evidence; fresh validated report cards; a
 real authenticated consumer smoke test; and configured/verified alert delivery.
 Do not bypass these gates to make a dashboard report green.
+
+## Post-release evidence
+
+Follow-ups verify the official SEC header (`File Name`) and compact dates,
+preserve original dates when an index republishes an older filing, recheck
+storage before every company commit, and stop carrying legacy exit-zero
+timestamps forward as successful research evidence. Cached ACTIVE buy rows
+are filtered against the current report approval rather than trusted blindly.
+Runtime checkpoint files stay out of Git.
+
+On the VPS, rebuilding two indexes recovered 303,464,448 bytes without deleting
+source facts or raising the cap. The report loop was then observed running:
+2,126 cached reports versus 2,121 at baseline, no current loop error.
+A bounded eight-company SEC test imported 1,044 filings and advanced the latest
+filing date to October 22 (latest acceptance 18:29:31 UTC). The snapshot still
+had 2,193 pending companies / 11,063 pending accessions and one unpublished
+October 22 daily index. That is PARTIAL, not a completed universe refresh.
+The regular scheduler was restarted with durable retry checkpoints enabled.
+
+The separate read credential was generated on the VPS without disclosure.
+Live evidence: its GET returned packet V2 / accepted=false; mutation auth
+rejected it with 401. Anonymous packet GET returned 401. Health and frontend
+routes returned 200. Trading Terminal consumer commit 2011d6d remains only on
+its audit branch and is not deployed to the trading system.
+
+A current database snapshot was streamed off the VPS to the laptop without
+creating a VPS archive: 1,643,353,544 bytes, SHA-256
+9c942e90306557924ddf7c83f5fd250313c42da839d4feec8af4050d98a99040.
+The checksum was independently reread and matched. A full local restore,
+including post-data constraints/indexes, was started separately; its final
+success and row counts must be recorded before claiming recovery verified.

@@ -31,6 +31,9 @@ data/*.db-shm
 data/*.db-wal
 data/scheduler_cycle_status.json
 data/scheduler_cycle_status.json.partial
+data/sec_discovery_*.json
+data/sec_discovery_*.json.lock
+data/automation_cycle_*.json
 accountant-ci-local.db
 *.duckdb
 *.duckdb.wal

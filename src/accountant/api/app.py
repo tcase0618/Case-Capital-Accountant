@@ -92,6 +92,7 @@ from accountant.research.buy_board import (
     _best_price,
     _sector_from_description,
     _upside_pct,
+    _validated_report,
     future_upside_candidates,
 )
 from accountant.research.cache_warmer import CACHE_WARMER
@@ -1884,12 +1885,15 @@ def cache_status() -> CacheWarmStatusResponse:
 
 @app.get("/api/buy-board", response_model=list[BuyBoardCandidateResponse])
 def list_buy_board(session: SessionDep) -> list[BuyBoardCandidateResponse]:
-    candidates = session.execute(
-        select(BuyBoardCandidate)
+    pairs = session.execute(
+        select(BuyBoardCandidate, CompanyReport)
+        .join(CompanyReport, CompanyReport.company_id == BuyBoardCandidate.company_id)
         .options(selectinload(BuyBoardCandidate.company))
         .where(BuyBoardCandidate.status == "ACTIVE")
         .order_by(BuyBoardCandidate.current_cc_valuation.desc().nullslast(), BuyBoardCandidate.ticker.asc())
-    ).scalars().all()
+    ).all()
+    # Old ACTIVE cache rows are not evidence that today's report is approved.
+    candidates = [candidate for candidate, report in pairs if _validated_report(report)]
     return [
         BuyBoardCandidateResponse(
             ticker=row.ticker,
