@@ -5,6 +5,7 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -26,6 +27,13 @@ from accountant.research.financial_input_safety import (
     expected_unit,
     provenance,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_external_http(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("Financial safety fixtures must not make external HTTP requests")
+    monkeypatch.setattr(httpx.Client, "send", forbidden)
 
 
 def fact(concept="Revenues", value=100, start=date(2025, 1, 1), end=date(2025, 12, 31), **kwargs):
@@ -158,6 +166,9 @@ def test_report_build_unknown_events_and_immutable_card(test_session, monkeypatc
     monkeypatch.setattr(machine, "_resolved_current_price", lambda *a, **k: None)
     monkeypatch.setattr(machine, "sync_buy_board_candidate", lambda *a, **k: None)
     monkeypatch.setattr(machine, "upsert_company_bottleneck_snapshot", lambda *a, **k: None)
+    monkeypatch.setattr(machine, "membership_for_ticker", lambda _: SimpleNamespace(
+        in_sp500=False, in_russell2000=False, in_nasdaq_comp=False,
+    ))
     company = Company(cik="0000000001", name="Safety Fixture")
     test_session.add(company)
     test_session.flush()
