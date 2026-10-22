@@ -203,12 +203,9 @@ def record_cycle(
         "started_at": started,
         "last_cycle_at": finished,
         "generation": generation,
-        "last_success_at": previous.get("last_success_at")
-        or (
-            previous.get("last_cycle_at")
-            if previous.get("status") == "complete" and previous.get("exit_code") == 0
-            else None
-        ),
+        # Legacy "complete" only meant process exit 0, including storage pauses.
+        # It cannot be promoted into evidence of a successful research cycle.
+        "last_success_at": previous.get("last_success_at"),
     }
     if code != 0:
         return result

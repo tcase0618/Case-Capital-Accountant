@@ -38,7 +38,9 @@ def test_paused_cycle_keeps_last_success(readiness, tmp_path):
     now = datetime.now(UTC)
     old = (now - timedelta(hours=2)).isoformat()
     status = write(
-        tmp_path / "status.json", {"status": "complete", "exit_code": 0, "last_cycle_at": old}
+        tmp_path / "status.json", {
+            "status": "complete", "exit_code": 0, "last_cycle_at": old, "last_success_at": old,
+        }
     )
     summary = write(
         tmp_path / "summary.json",
@@ -54,6 +56,17 @@ def test_paused_cycle_keeps_last_success(readiness, tmp_path):
     assert result["generation"] == "cycle-2"
     write(status, result)
     assert not readiness.scheduler_status(status, now=now)["ok"]
+
+
+def test_legacy_exit_zero_does_not_establish_success(readiness, tmp_path):
+    now = datetime.now(UTC).isoformat()
+    status = write(tmp_path / "status.json", {"status": "complete", "exit_code": 0, "last_cycle_at": now})
+    summary = write(tmp_path / "summary.json", {
+        "generated_at": now, "storage": {"blocked": True, "reason": "database_cap_reached"},
+    })
+    result = readiness.record_cycle(status, summary, 0, now, now, "new-generation")
+    assert result["status"] == "paused_storage"
+    assert result["last_success_at"] is None
 
 
 @pytest.mark.parametrize(
