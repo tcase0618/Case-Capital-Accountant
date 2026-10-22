@@ -322,10 +322,18 @@ class ContinuousResearchMachine:
         try:
             storage_decision = self._storage_preflight(engine)
             if not storage_decision.allowed:
+                # Storage admission blocks writes, not reporting already stored
+                # evidence. A cold restart must not display zero cached reports.
+                with factory() as session:
+                    reports_cached = session.execute(select(func.count()).select_from(CompanyReport)).scalar_one()
+                    total_companies = session.execute(select(func.count()).select_from(Company)).scalar_one()
                 with self._lock:
+                    self._snapshot.reports_cached = reports_cached
+                    self._snapshot.total_companies = total_companies
                     self._snapshot.storage_blocked = True
                     self._snapshot.storage_block_reason = storage_decision.reason
                     self._snapshot.last_action = f"storage gate blocked: {storage_decision.reason}"
+                    self._snapshot.worker_states = self._blank_worker_states()
                 return False
             with self._lock:
                 self._snapshot.storage_blocked = False

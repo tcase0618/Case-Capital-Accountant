@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -187,3 +188,26 @@ def test_report_build_unknown_events_and_immutable_card(test_session, monkeypatc
     machine.ContinuousResearchMachine()._build_report(test_session, company, "SAFE")
     test_session.refresh(card)
     assert card.final_verdict == original
+
+
+def test_storage_paused_restart_reports_persisted_counts(test_session, test_engine, monkeypatch):
+    company = Company(cik="0000000001", name="Stored")
+    test_session.add(company)
+    test_session.flush()
+    test_session.add(CompanyReport(
+        company_id=company.id, ticker="SAFE", company_name="Stored",
+        as_of_date="2026-10-22", stance="NEUTRAL", pipeline_stage="unvalidated",
+    ))
+    test_session.commit()
+    worker = machine.ContinuousResearchMachine()
+    monkeypatch.setattr(machine, "create_db_engine", lambda: test_engine)
+    monkeypatch.setattr(test_engine, "dispose", lambda: None)
+    monkeypatch.setattr(worker, "_storage_preflight", lambda _: SimpleNamespace(
+        allowed=False, reason="database_cap_reached",
+    ))
+    monkeypatch.setattr(worker, "_sync_universes_if_needed", lambda _: pytest.fail("write path must not run"))
+    assert worker._run_cycle() is False
+    snapshot = worker.snapshot()
+    assert snapshot["reports_cached"] == 1
+    assert snapshot["total_companies"] == 1
+    assert snapshot["storage_blocked"] is True
