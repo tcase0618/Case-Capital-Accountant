@@ -259,7 +259,9 @@ def _load_matching_daily_index_filings(
             if "cik|companyname|formtype|datefiled|filename" not in headers_seen:
                 raise ValueError(f"invalid daily index: {current}")
             for row in _parse_master_idx(response.text):
-                if row.filing_date != current or row.filing_date > date.today():
+                # A dissemination index can republish older filings/corrections.
+                # Retain the original filing date; never replace it with index day.
+                if row.filing_date > current or row.filing_date > date.today():
                     raise ValueError(f"invalid filing date in index: {row.filing_date}")
                 if row.cik not in universe:
                     continue

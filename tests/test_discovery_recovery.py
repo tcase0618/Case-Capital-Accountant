@@ -50,13 +50,14 @@ def test_each_company_admission_honors_storage_reserve(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("filename_header", ["File Name", "Filename"])
-def test_real_edgar_header_and_compact_date_are_accepted(monkeypatch, filename_header):
+@pytest.mark.parametrize("filed", [DAY, date(2025, 2, 28)])
+def test_real_edgar_header_and_compact_date_are_accepted(monkeypatch, filename_header, filed):
     # Shape observed in the official October 21 daily dissemination feed.
     body = (
         "Description: Daily Index of EDGAR Dissemination Feed\n"
         f"CIK|Company Name|Form Type|Date Filed|{filename_header}\n"
         "----------------------------------------------------------------\n"
-        f"1|One|10-K|20261020|edgar/data/1/{A}.txt\n"
+        f"1|One|10-K|{filed:%Y%m%d}|edgar/data/1/{A}.txt\n"
     )
     monkeypatch.setattr(importer, "get_settings", lambda: SimpleNamespace(
         sec_user_agent="Case Capital offline test test@example.com", sec_timeout_seconds=5,
@@ -68,7 +69,7 @@ def test_real_edgar_header_and_compact_date_are_accepted(monkeypatch, filename_h
         DAY, DAY, {CIK: {"ticker": "ONE"}}, forms={"10-K"},
     )
     assert len(rows) == 1
-    assert rows[0].filing_date == DAY
+    assert rows[0].filing_date == filed
     assert rows[0].cik == CIK
 
 
