@@ -35,6 +35,20 @@ def test_discovery_does_not_invent_failed_indexes_on_edgar_holidays(tmp_path):
     assert days == [date(2026, 10, 9), date(2026, 10, 13)]
 
 
+def test_each_company_admission_honors_storage_reserve(tmp_path, monkeypatch):
+    monkeypatch.setattr(importer, "get_settings", lambda: SimpleNamespace(
+        storage_max_database_gb=14, storage_min_free_disk_gb=25,
+        storage_worker_reserve_mb=128, data_dir=tmp_path,
+    ))
+    monkeypatch.setattr(importer.shutil, "disk_usage", lambda _: SimpleNamespace(free=30 * 1024**3))
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        execute=lambda _: SimpleNamespace(scalar_one=lambda: 14 * 1024**3 - 64 * 1024**2),
+    )
+    with pytest.raises(importer.StoragePaused, match="database_cap_reached"):
+        importer._require_storage_headroom(session)
+
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     def forbidden(*args, **kwargs):

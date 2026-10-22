@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from accountant.config import get_settings
 from accountant.db import create_db_engine, create_session_factory, sqlite_write_guard
 from accountant.db.models import Company, Filing, Security
 from accountant.ingest.filings import FilingFetchPayload, ingest_company_filings_payload
+from accountant.ops.storage_budget import StorageBudget, evaluate_storage_budget
 from accountant.sec import SecClient
 from accountant.sec.discovery_state import DiscoveryState, checkpoint_lock
 from accountant.sec.rate_limit import RateLimiter
@@ -329,6 +331,27 @@ def _required_shards(client, submissions, missing):
     return shards
 
 
+class StoragePaused(RuntimeError):
+    pass
+
+
+def _require_storage_headroom(session):
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    settings = get_settings()
+    decision = evaluate_storage_budget(
+        StorageBudget(
+            max_database_gb=settings.storage_max_database_gb,
+            min_free_disk_gb=settings.storage_min_free_disk_gb,
+        ),
+        database_bytes=session.execute(text("SELECT pg_database_size(current_database())")).scalar_one(),
+        disk_free_bytes=shutil.disk_usage(settings.data_dir.resolve()).free,
+        reserved_bytes=max(0, settings.storage_worker_reserve_mb) * 1024 * 1024,
+    )
+    if not decision.allowed:
+        raise StoragePaused(decision.reason)
+
+
 def _import_affected_submissions(
     factory,
     affected_ciks: list[str],
@@ -345,6 +368,8 @@ def _import_affected_submissions(
     queue = deque(affected_ciks)
     queue_lock = threading.Lock()
     counter_lock = threading.Lock()
+    commit_lock = threading.Lock()
+    storage_paused = threading.Event()
     shared_limiter = RateLimiter(min_interval_seconds)
     total = len(affected_ciks)
 
@@ -353,7 +378,7 @@ def _import_affected_submissions(
             sec_client._limiter = shared_limiter
             while True:
                 with queue_lock:
-                    if not queue:
+                    if not queue or storage_paused.is_set():
                         return
                     cik = queue.popleft()
                 info = universe.get(cik, {"ticker": "", "name": cik})
@@ -374,7 +399,10 @@ def _import_affected_submissions(
                         submissions=submissions,
                         historical_shards=_required_shards(sec_client, submissions, missing),
                     )
-                    with sqlite_write_guard():
+                    # Fetches remain parallel; serialize budget admission and
+                    # commits so every company rechecks current disk usage.
+                    with commit_lock, sqlite_write_guard():
+                        _require_storage_headroom(session)
                         result = ingest_company_filings_payload(session, payload)
                         session.commit()
                     if expected[cik] - _existing_accessions(factory, cik, expected[cik]):
@@ -393,6 +421,8 @@ def _import_affected_submissions(
                             flush=True,
                         )
                 except Exception as exc:
+                    if isinstance(exc, StoragePaused):
+                        storage_paused.set()
                     session.rollback()
                     with counter_lock:
                         counters.errors += 1
