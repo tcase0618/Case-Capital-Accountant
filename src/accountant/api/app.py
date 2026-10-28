@@ -1397,9 +1397,9 @@ def deployment_readiness(session: SessionDep) -> DeploymentReadinessResponse:
     source = build_source_integrity_snapshot(session)
     gates = [
         {"name": "research_only", "passed": mode["execution_allowed"] is False, "detail": "Accountant execution authority is blocked."},
-        {"name": "machine_running", "passed": bool(machine.get("running")), "detail": machine.get("last_action") or "machine status unavailable"},
+        {"name": "machine_running", "passed": bool(machine.get("running")) and not machine.get("storage_blocked"), "detail": machine.get("storage_block_reason") or machine.get("last_action") or "machine status unavailable"},
         {"name": "source_integrity", "passed": source.get("source_grade") in {"STRONG", "WATCH"}, "detail": source.get("source_grade")},
-        {"name": "blocked_companies", "passed": int(machine.get("blocked_companies") or 0) == 0, "detail": machine.get("blocked_companies") or 0},
+        {"name": "blocked_companies", "passed": not machine.get("storage_blocked") and int(machine.get("blocked_companies") or 0) == 0, "detail": machine.get("storage_block_reason") or machine.get("blocked_companies") or 0},
         {"name": "stability_window", "passed": False, "detail": "Seven-day evidence is not yet persisted."},
     ]
     ready = all(bool(gate["passed"]) for gate in gates)
@@ -1751,6 +1751,7 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
     ready = (
         bool(settings.machine_enabled)
         and bool(mode["terminal_handoff_allowed"])
+        and not machine.get("storage_blocked")
         and int(machine.get("runnable_companies") or 0) == 0
         and int(machine.get("blocked_companies") or 0) == 0
         and int(metrics.get("companies_with_reports") or 0) > 0
@@ -1759,6 +1760,8 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
     )
     if not settings.machine_enabled:
         completion_state = "paused"
+    elif machine.get("storage_blocked"):
+        completion_state = "paused_storage"
     elif int(machine.get("blocked_companies") or 0) > 0:
         completion_state = "blocked"
     elif ready:

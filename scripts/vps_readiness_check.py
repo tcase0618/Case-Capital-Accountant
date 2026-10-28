@@ -46,7 +46,7 @@ def main() -> int:
         _get_json(client, f"{base_url}/api/paper-books", checks, "paper_books")
 
     _expect(checks, "health_ok", health.get("status") == "ok", health)
-    _expect(checks, "machine_running", bool(reports.get("running")), reports)
+    _expect(checks, "machine_running", bool(reports.get("running")) and not reports.get("storage_blocked"), reports)
     _expect(checks, "reports_cached", int(reports.get("reports_cached") or 0) > 0, reports)
     _expect(
         checks, "no_report_loop_error", not reports.get("last_error"), reports.get("last_error")

@@ -330,6 +330,8 @@ class ContinuousResearchMachine:
                     self._snapshot.storage_blocked = True
                     self._snapshot.storage_block_reason = storage_decision.reason
                     self._snapshot.last_action = f"storage gate blocked: {storage_decision.reason}"
+                with factory() as paused_session:
+                    self._refresh_progress_snapshot(paused_session)
                 return False
             with self._lock:
                 self._snapshot.storage_blocked = False
@@ -339,6 +341,7 @@ class ContinuousResearchMachine:
             try:
                 if not self._storage_gate.claim():
                     self._record_storage_block()
+                    self._refresh_progress_snapshot(session)
                     return False
                 try:
                     self._sync_universes_if_needed(session)

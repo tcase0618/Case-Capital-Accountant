@@ -721,8 +721,12 @@ class BuyBoardScheduler:
                 session.commit()
             with self._lock:
                 self._snapshot.last_refresh_at = _now_utc().isoformat()
-                self._snapshot.last_action = f"refreshed buy board ({summary['updated']} quotes)"
-                self._snapshot.last_error = None
+                incomplete = int(summary["successes"]) < int(summary["candidate_count"])
+                self._snapshot.last_action = (
+                    f"degraded buy board ({summary['successes']}/{summary['candidate_count']} quotes)"
+                    if incomplete else f"refreshed buy board ({summary['updated']} quotes)"
+                )
+                self._snapshot.last_error = "quote_refresh_incomplete" if incomplete else None
                 self._snapshot.candidate_count = int(summary["candidate_count"])
                 self._snapshot.last_refresh_count = int(summary["updated"])
                 self._snapshot.last_success_count = int(summary["successes"])
