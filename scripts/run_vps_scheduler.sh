@@ -34,7 +34,11 @@ while true; do
   else
     cycle_exit_code=$?
     cycle_status="failed"
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] automation cycle failed; will retry on the next poll" >&2
+    if [ "$cycle_exit_code" -eq 75 ]; then
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] storage pause returned; validating cycle evidence" >&2
+    else
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] automation cycle failed; will retry on the next poll" >&2
+    fi
   fi
 
   finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

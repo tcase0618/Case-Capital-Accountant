@@ -34,7 +34,8 @@ def write(path, payload):
     return path
 
 
-def test_paused_cycle_keeps_last_success(readiness, tmp_path):
+@pytest.mark.parametrize("exit_code", [0, 75])
+def test_paused_cycle_keeps_last_success(readiness, tmp_path, exit_code):
     now = datetime.now(UTC)
     old = (now - timedelta(hours=2)).isoformat()
     status = write(
@@ -45,17 +46,30 @@ def test_paused_cycle_keeps_last_success(readiness, tmp_path):
     summary = write(
         tmp_path / "summary.json",
         {
+            "status": "paused_storage",
             "generated_at": now.isoformat(),
             "storage": {"blocked": True, "reason": "database_cap_reached"},
         },
     )
-    result = readiness.record_cycle(status, summary, 0, now.isoformat(), now.isoformat(), "cycle-2")
+    result = readiness.record_cycle(status, summary, exit_code, now.isoformat(), now.isoformat(), "cycle-2")
     assert result["status"] == "paused_storage"
     assert result["reason"] == "database_cap_reached"
     assert result["last_success_at"] == old
     assert result["generation"] == "cycle-2"
     write(status, result)
     assert not readiness.scheduler_status(status, now=now)["ok"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"status": "complete", "storage": {"blocked": False}, "steps": []},
+    {"status": "complete", "storage": {"blocked": True}},
+])
+def test_exit_75_requires_matching_pause_evidence(readiness, tmp_path, payload):
+    now = datetime.now(UTC).isoformat()
+    summary = write(tmp_path / "summary.json", {**payload, "generated_at": now})
+    result = readiness.record_cycle(tmp_path / "status", summary, 75, now, now, "cycle")
+    assert result["status"] == "failed"
+    assert result["last_success_at"] is None
 
 
 def test_legacy_exit_zero_does_not_establish_success(readiness, tmp_path):
@@ -187,7 +201,8 @@ def test_malformed_monitor_payload_fails_closed(readiness, tmp_path, payload):
         ]
 
 
-def test_shell_exit_zero_storage_blocked_is_paused(tmp_path):
+@pytest.mark.parametrize("exit_code", [0, 75])
+def test_shell_storage_pause_requires_summary_evidence(tmp_path, exit_code):
     bash = shutil.which("bash") or (
         "C:/Program Files/Git/bin/bash.exe" if os.name == "nt" else None
     )
@@ -202,9 +217,10 @@ def test_shell_exit_zero_storage_blocked_is_paused(tmp_path):
         "sys.exit(99) if Path(os.environ['DATA_DIR'], 'scheduler_cycle_status.json').exists() else print(0)\n"
     )
     (scripts / "run_accountant_automation.py").write_text(
-        "import os, json\nfrom pathlib import Path\nfrom datetime import datetime, UTC\n"
+        "import os, json, sys\nfrom pathlib import Path\nfrom datetime import datetime, UTC\n"
         "Path(os.environ['ACCOUNTANT_CYCLE_SUMMARY_FILE']).write_text(json.dumps({"
-        "'generated_at': datetime.now(UTC).isoformat(), 'storage': {'blocked': True, 'reason': 'database_cap_reached'}}))\n"
+        "'status': 'paused_storage', 'generated_at': datetime.now(UTC).isoformat(), 'storage': {'blocked': True, 'reason': 'database_cap_reached'}}))\n"
+        f"sys.exit({exit_code})\n"
     )
     result = subprocess.run(
         [bash, "scripts/run_vps_scheduler.sh"],
@@ -223,5 +239,5 @@ def test_shell_exit_zero_storage_blocked_is_paused(tmp_path):
     assert result.returncode == 99, result.stderr
     payload = json.loads((tmp_path / "scheduler_cycle_status.json").read_text())
     assert payload["status"] == "paused_storage", result.stdout + result.stderr
-    assert payload["exit_code"] == 0
+    assert payload["exit_code"] == exit_code
     assert "cycle complete" not in result.stdout

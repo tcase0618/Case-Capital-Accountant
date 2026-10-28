@@ -39,7 +39,10 @@ def test_market_routes_require_operator_authentication(monkeypatch):
 
     monkeypatch.setattr(
         "accountant.api.auth.get_settings",
-        lambda: Settings(accountant_env="production", api_token="test-token"),
+        lambda: Settings(
+            accountant_env="production", api_token="test-token",
+            storage_max_database_gb=14, storage_min_free_disk_gb=25, storage_max_cycle_growth_gb=1,
+        ),
     )
     monkeypatch.setattr(module, "alpaca_status", lambda: pytest.fail("unauthorized upstream call"))
     monkeypatch.setattr(module, "ibkr_quote", lambda *_: pytest.fail("unauthorized upstream call"))

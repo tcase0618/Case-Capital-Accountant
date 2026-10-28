@@ -64,7 +64,7 @@ def main() -> int:
         _get_json(client, f"{base_url}/api/paper-books", checks, "paper_books")
 
     _expect(checks, "health_ok", health.get("status") == "ok", health)
-    _expect(checks, "machine_running", bool(reports.get("running")), reports)
+    _expect(checks, "machine_running", bool(reports.get("running")) and not reports.get("storage_blocked"), reports)
     cached = reports.get("reports_cached")
     _expect(checks, "reports_cached", type(cached) is int and cached > 0, reports)
     _expect(
@@ -207,7 +207,7 @@ def record_cycle(
         # It cannot be promoted into evidence of a successful research cycle.
         "last_success_at": previous.get("last_success_at"),
     }
-    if code != 0:
+    if code not in (0, 75):
         return result
     try:
         payload = json.loads(summary.read_text())
@@ -220,12 +220,15 @@ def record_cycle(
             raise ValueError("summary is not from this cycle")
         result["automation_generated_at"] = payload["generated_at"]
         storage = payload["storage"]
-        if storage["blocked"] is True:
+        if storage["blocked"] is True and (
+            code == 0 or payload.get("status") == "paused_storage"
+        ):
             result.update(
                 status="paused_storage", reason=storage.get("reason") or "storage_blocked"
             )
         elif (
-            storage["blocked"] is False
+            code == 0
+            and storage["blocked"] is False
             and payload.get("status") == "complete"
             and all(step["returncode"] == 0 for step in payload["steps"])
         ):

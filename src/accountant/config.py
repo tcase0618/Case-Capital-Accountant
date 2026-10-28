@@ -1,7 +1,9 @@
+import math
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +17,7 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        hide_input_in_errors=True,
     )
 
     sec_user_agent: str = Field(default="", description="SEC-compliant User-Agent")
@@ -78,6 +81,26 @@ class Settings(BaseSettings):
     sec_timeout_seconds: float = Field(default=30.0)
     sec_backoff_min_seconds: float = Field(default=0.5)
     sec_backoff_max_seconds: float = Field(default=8.0)
+
+    @model_validator(mode="after")
+    def _require_production_storage_limits(self) -> Self:
+        if self.is_production:
+            limits = (
+                self.storage_max_database_gb,
+                self.storage_min_free_disk_gb,
+                self.storage_max_cycle_growth_gb,
+            )
+            if any(not math.isfinite(value) or value <= 0 for value in limits):
+                raise ValueError("Production storage limits must all be finite and greater than zero")
+        return self
+
+    @field_validator("accountant_env")
+    @classmethod
+    def _normalize_accountant_env(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"development", "test", "production"}:
+            raise ValueError("ACCOUNTANT_ENV must be development, test, or production")
+        return normalized
 
     @field_validator("log_level")
     @classmethod

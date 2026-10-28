@@ -128,8 +128,8 @@ def main() -> int:
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         _publish_scheduler_summary(payload)
         print(json.dumps(payload, indent=2), flush=True)
-        # This is a controlled pause, not a failed ingestion or corrupt database.
-        return 0
+        # EX_TEMPFAIL distinguishes a controlled pause from completed work.
+        return 75
 
     if not args.skip_import:
         command = [

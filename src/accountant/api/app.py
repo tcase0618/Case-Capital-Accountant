@@ -1413,9 +1413,9 @@ def deployment_readiness(session: SessionDep) -> DeploymentReadinessResponse:
     source = build_source_integrity_snapshot(session)
     gates = [
         {"name": "research_only", "passed": mode["execution_allowed"] is False, "detail": "Accountant execution authority is blocked."},
-        {"name": "machine_running", "passed": bool(machine.get("running")), "detail": machine.get("last_action") or "machine status unavailable"},
+        {"name": "machine_running", "passed": bool(machine.get("running")) and not machine.get("storage_blocked"), "detail": machine.get("storage_block_reason") or machine.get("last_action") or "machine status unavailable"},
         {"name": "source_integrity", "passed": source.get("source_grade") in {"STRONG", "WATCH"}, "detail": source.get("source_grade")},
-        {"name": "blocked_companies", "passed": int(machine.get("blocked_companies") or 0) == 0, "detail": machine.get("blocked_companies") or 0},
+        {"name": "blocked_companies", "passed": not machine.get("storage_blocked") and int(machine.get("blocked_companies") or 0) == 0, "detail": machine.get("storage_block_reason") or machine.get("blocked_companies") or 0},
         {"name": "stability_window", "passed": False, "detail": "Seven-day evidence is not yet persisted."},
     ]
     ready = all(bool(gate["passed"]) for gate in gates)
@@ -1800,6 +1800,8 @@ def accountant_integration_status(session: SessionDep) -> AccountantIntegrationS
         ready = validation_coverage_pct >= 95.0
     if not settings.machine_enabled:
         completion_state = "paused"
+    elif machine.get("storage_blocked"):
+        completion_state = "paused_storage"
     elif int(machine.get("blocked_companies") or 0) > 0:
         completion_state = "blocked"
     elif ready:
@@ -1956,6 +1958,6 @@ def frontend_entry() -> FileResponse | dict[str, str]:
 
 @app.get("/{full_path:path}", response_model=None)
 def frontend_routes(full_path: str) -> FileResponse | dict[str, str]:
-    if full_path.startswith(("api/", "companies/", "assets/")):
+    if full_path.split("/", 1)[0] in {"api", "companies", "assets", "health"}:
         raise HTTPException(status_code=404, detail="Not found")
     return frontend_entry()

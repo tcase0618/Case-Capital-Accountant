@@ -41,7 +41,7 @@ def test_scheduler_blocks_before_import_when_worker_reserve_exceeds_cap(tmp_path
         raise AssertionError("Storage-blocked scheduler must not launch a data job")
 
     monkeypatch.setattr(module, "_run_step", forbidden_import)
-    assert module.main() == 0  # A controlled storage pause, not corrupt ingestion.
+    assert module.main() == 75  # Controlled pause is distinct from completed work.
     payload = json.loads(next(tmp_path.glob("accountant_automation_*.json")).read_text())
     assert payload["storage"]["blocked"] is True
     assert payload["storage"]["reason"] == "database_cap_reached"
