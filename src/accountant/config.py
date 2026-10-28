@@ -1,7 +1,9 @@
+import math
 from functools import lru_cache
 from pathlib import Path
+from typing import Self
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +35,9 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     data_dir: Path = Field(default=Path("./data"))
     market_data_mode: str = Field(default="research_only")
-    operating_mode: str = Field(default="standalone_research", validation_alias="ACCOUNTANT_OPERATING_MODE")
+    operating_mode: str = Field(
+        default="standalone_research", validation_alias="ACCOUNTANT_OPERATING_MODE"
+    )
     ibkr_enabled: bool = Field(default=False)
     ibkr_host: str = Field(default="127.0.0.1")
     ibkr_port: int = Field(default=7497)
@@ -49,11 +53,15 @@ class Settings(BaseSettings):
     # Zero disables a limit. Production uses these to preserve operating headroom.
     storage_max_database_gb: float = Field(
         default=0.0,
-        validation_alias=AliasChoices("ACCOUNTANT_STORAGE_MAX_DATABASE_GB", "STORAGE_MAX_DATABASE_GB"),
+        validation_alias=AliasChoices(
+            "ACCOUNTANT_STORAGE_MAX_DATABASE_GB", "STORAGE_MAX_DATABASE_GB"
+        ),
     )
     storage_min_free_disk_gb: float = Field(
         default=0.0,
-        validation_alias=AliasChoices("ACCOUNTANT_STORAGE_MIN_FREE_DISK_GB", "STORAGE_MIN_FREE_DISK_GB"),
+        validation_alias=AliasChoices(
+            "ACCOUNTANT_STORAGE_MIN_FREE_DISK_GB", "STORAGE_MIN_FREE_DISK_GB"
+        ),
     )
     storage_max_cycle_growth_gb: float = Field(
         default=0.0,
@@ -75,6 +83,20 @@ class Settings(BaseSettings):
     sec_timeout_seconds: float = Field(default=30.0)
     sec_backoff_min_seconds: float = Field(default=0.5)
     sec_backoff_max_seconds: float = Field(default=8.0)
+
+    @model_validator(mode="after")
+    def _require_production_storage_limits(self) -> Self:
+        if self.is_production:
+            limits = (
+                self.storage_max_database_gb,
+                self.storage_min_free_disk_gb,
+                self.storage_max_cycle_growth_gb,
+            )
+            if any(not math.isfinite(value) or value <= 0 for value in limits):
+                raise ValueError(
+                    "Production storage limits must all be finite and greater than zero"
+                )
+        return self
 
     @field_validator("log_level")
     @classmethod

@@ -58,6 +58,19 @@ Before a maintenance cycle, the scheduler checks the database and free disk spac
 
 This governor protects the VPS; it does not authorize deletion of immutable `raw_facts`. Moving raw facts off the VPS requires a verified archive export and a provenance-preserving schema refactor first.
 
+Production startup requires all three storage limits to be finite and positive.
+Missing, zero, negative, NaN or infinite limits now fail closed; development/test
+may still use zero for isolated offline fixtures. An operator must verify the
+existing production configuration before deploying this validation change.
+
+Scheduler admission includes `ACCOUNTANT_STORAGE_WORKER_RESERVE_MB`. A blocked
+automation run writes `status=paused_storage` and its exact budget reason in its
+summary, then exits 75 (controlled pause, not success). The scheduler keeps
+polling and atomically publishes `paused_storage`, exit code 75, and the generic
+reason `storage_budget_exhausted`; readiness rejects that state. Direct callers
+must distinguish exit 75 from completion and from ingestion failures. This does
+not raise any limit or authorize capacity changes or cleanup.
+
 ## SEC Polling And Rebuild Path
 
 The scheduler polls every 15 minutes during the two EDGAR filing windows configured in `.env.production`:

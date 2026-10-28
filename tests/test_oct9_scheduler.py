@@ -2,10 +2,17 @@ import json
 import os
 import subprocess
 
+import pytest
+
 from test_oct9_backups import BASH, ROOT
 
 
-def test_failed_scheduler_cycle_persists_failure_and_reaches_next_poll(tmp_path):
+@pytest.mark.parametrize(
+    "exit_code,expected_status", [(7, "failed"), (75, "paused_storage"), (0, "complete")]
+)
+def test_failed_scheduler_cycle_persists_failure_and_reaches_next_poll(
+    tmp_path, exit_code, expected_status
+):
     script = tmp_path / "scheduler.sh"
     content = (ROOT / "scripts/run_vps_scheduler.sh").read_text()
     if os.environ.get("OCT9_TEST_BASELINE"):
@@ -20,7 +27,7 @@ case "$1" in
 *scheduler_timing.py)
   if [ -f "$CYCLE_MARKER" ]; then exit 99; fi
   echo 0;;
-*run_accountant_automation.py) touch "$CYCLE_MARKER"; exit 7;;
+*run_accountant_automation.py) touch "$CYCLE_MARKER"; exit "$CYCLE_EXIT";;
 esac
 """,
         newline="\n",
@@ -34,15 +41,27 @@ esac
             "ACCOUNTANT_ACTIVE_POLL_INTERVAL_SECONDS": "0",
             "DATA_DIR": tmp_path.as_posix(),
             "CYCLE_MARKER": (tmp_path / "cycle-marker").as_posix(),
+            "CYCLE_EXIT": str(exit_code),
         },
         capture_output=True,
         text=True,
         timeout=30,
     )
     assert result.returncode == 99, result.stderr
-    assert "cycle failed" in result.stdout
-    assert "cycle complete" not in result.stdout
+    assert f"cycle {expected_status}" in result.stdout
+    if exit_code:
+        assert "cycle complete" not in result.stdout
     status = json.loads((tmp_path / "scheduler_cycle_status.json").read_text())
-    assert status["status"] == "failed"
-    assert status["exit_code"] == 7
+    assert status["status"] == expected_status
+    assert status["exit_code"] == exit_code
     assert status["last_cycle_at"].endswith("Z")
+    if expected_status == "paused_storage":
+        assert status["reason"] == "storage_budget_exhausted"
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "scheduler_readiness", ROOT / "scripts/vps_readiness_check.py"
+        )
+        readiness = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(readiness)
+        assert not readiness.scheduler_status(tmp_path / "scheduler_cycle_status.json")["ok"]

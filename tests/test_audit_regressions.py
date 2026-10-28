@@ -12,6 +12,7 @@ from accountant.research import report_machine as module
 from accountant.research.report_machine import ContinuousResearchMachine
 
 ROOT = Path(__file__).resolve().parents[1]
+_STORAGE_LIMITS = dict(storage_max_database_gb=14, storage_min_free_disk_gb=25, storage_max_cycle_growth_gb=1)
 
 
 @pytest.mark.parametrize("environment", ["prod", "staging", "typo"])
@@ -21,7 +22,7 @@ def test_unknown_environment_rejected(environment):
 
 
 def test_production_environment_normalized():
-    assert Settings(accountant_env=" production ").is_production
+    assert Settings(accountant_env=" production ", **_STORAGE_LIMITS).is_production
 
 
 def test_statement_lane_exception_reaches_worker(monkeypatch):
@@ -99,7 +100,7 @@ def test_token_comparison_uses_constant_time(monkeypatch):
 
     import accountant.api.auth as auth
 
-    monkeypatch.setattr(auth, "get_settings", lambda: Settings(accountant_env="production", api_token="secret"))
+    monkeypatch.setattr(auth, "get_settings", lambda: Settings(accountant_env="production", api_token="secret", **_STORAGE_LIMITS))
     compare = Mock(return_value=True)
     monkeypatch.setattr(auth.hmac, "compare_digest", compare)
     assert auth.require_api_token(HTTPAuthorizationCredentials(scheme="Bearer", credentials="secret")) == "secret"
@@ -168,7 +169,7 @@ def test_every_mutation_and_external_data_route_requires_auth():
 def test_production_startup_does_not_create_unversioned_tables(monkeypatch):
     import accountant.api.app as app_module
 
-    monkeypatch.setattr(app_module, "get_settings", lambda: Settings(accountant_env="production", machine_enabled=False))
+    monkeypatch.setattr(app_module, "get_settings", lambda: Settings(accountant_env="production", machine_enabled=False, **_STORAGE_LIMITS))
     create = Mock()
     monkeypatch.setattr(app_module.Base.metadata, "create_all", create)
     monkeypatch.setattr(app_module, "_API_SESSION_FACTORY", Mock(return_value=Mock()))

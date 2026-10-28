@@ -29,15 +29,22 @@ while true; do
     ${ACCOUNTANT_REFRESH_ALL_SCORES:+--refresh-all-scores}; then
     cycle_status="complete"
     cycle_exit_code=0
+    cycle_reason="none"
   else
     cycle_exit_code=$?
-    cycle_status="failed"
-    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] automation cycle failed; will retry on the next poll" >&2
+    if [ "$cycle_exit_code" -eq 75 ]; then
+      cycle_status="paused_storage"
+      cycle_reason="storage_budget_exhausted"
+    else
+      cycle_status="failed"
+      cycle_reason="automation_error"
+    fi
+    echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] automation cycle $cycle_status; will retry on the next poll" >&2
   fi
 
   finished_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  printf '{"last_cycle_at":"%s","status":"%s","exit_code":%s}\n' \
-    "$finished_at" "$cycle_status" "$cycle_exit_code" > "$status_dir/scheduler_cycle_status.json.partial"
+  printf '{"last_cycle_at":"%s","status":"%s","exit_code":%s,"reason":"%s"}\n' \
+    "$finished_at" "$cycle_status" "$cycle_exit_code" "$cycle_reason" > "$status_dir/scheduler_cycle_status.json.partial"
   mv -- "$status_dir/scheduler_cycle_status.json.partial" "$status_dir/scheduler_cycle_status.json"
   echo "[$finished_at] accountant automation cycle $cycle_status"
   sleep "$active_interval_seconds"

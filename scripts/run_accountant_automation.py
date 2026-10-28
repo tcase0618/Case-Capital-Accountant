@@ -104,10 +104,12 @@ def main() -> int:
         database_bytes=storage_before["database_bytes"],
         disk_free_bytes=storage_before["disk_free_bytes"],
         cycle_start_database_bytes=storage_before["database_bytes"],
+        reserved_bytes=max(0, settings.storage_worker_reserve_mb) * 1024 * 1024,
     )
     if not preflight.allowed:
         payload = {
             "run_id": run_id,
+            "status": "paused_storage",
             "generated_at": datetime.now(UTC).isoformat(),
             "before": before,
             "after": before,
@@ -124,8 +126,8 @@ def main() -> int:
         }
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(json.dumps(payload, indent=2), flush=True)
-        # This is a controlled pause, not a failed ingestion or corrupt database.
-        return 0
+        # Distinct controlled-pause code: the scheduler must not publish success.
+        return 75
 
     if not args.skip_import:
         command = [

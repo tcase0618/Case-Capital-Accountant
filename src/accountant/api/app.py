@@ -1908,6 +1908,6 @@ def frontend_entry() -> FileResponse | dict[str, str]:
 
 @app.get("/{full_path:path}", response_model=None)
 def frontend_routes(full_path: str) -> FileResponse | dict[str, str]:
-    if full_path.startswith(("api/", "companies/", "assets/")):
+    if full_path.split("/", 1)[0] in {"api", "companies", "assets", "health"}:
         raise HTTPException(status_code=404, detail="Not found")
     return frontend_entry()
