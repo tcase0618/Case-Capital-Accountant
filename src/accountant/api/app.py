@@ -107,7 +107,9 @@ from accountant.research.sector_intelligence import (
     sector_profile,
     sub_sector_profile,
 )
-from accountant.research.source_integrity import build_source_integrity_snapshot
+from accountant.research.source_integrity import (
+    cached_source_integrity_snapshot as build_source_integrity_snapshot,
+)
 from accountant.sec import SecClient
 from accountant.sec.companyfacts import CompanyFactsClient
 from accountant.sec.exceptions import SecConfigError
