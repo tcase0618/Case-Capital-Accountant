@@ -647,6 +647,8 @@ class BuyBoardStatusResponse(BaseModel):
     started_at: str | None = None
     next_refresh_at: str | None = None
     last_refresh_at: str | None = None
+    last_session_date: str | None = None
+    calendar_version: str | None = None
     last_action: str | None = None
     last_error: str | None = None
     candidate_count: int
