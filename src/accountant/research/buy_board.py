@@ -14,6 +14,7 @@ from accountant.db import create_db_engine, create_session_factory, sqlite_write
 from accountant.db.models import BuyBoardCandidate, BuyBoardSnapshot, CompanyReport, RawFact
 from accountant.logging import get_logger
 from accountant.market.alpaca_research import quote as alpaca_quote
+from accountant.ops.nyse_calendar import NYSE_CALENDAR_VERSION, nyse_session
 from accountant.research.financial_input_safety import RULE_VERSION, select_facts
 
 log = get_logger(__name__)
@@ -33,6 +34,7 @@ class BuyBoardSnapshotState:
     candidate_count: int = 0
     last_refresh_count: int = 0
     last_success_count: int = 0
+    last_session_date: str | None = None
 
 
 def _now_utc() -> datetime:
@@ -600,7 +602,14 @@ def _active_candidate_count(session: Session) -> int:
 
 
 def _session_label(now_et: datetime) -> str:
+    session = nyse_session(now_et.date())
+    if session is None:
+        return "NON_SESSION"
     current = now_et.timetz().replace(tzinfo=None)
+    if now_et < session[0]:
+        return "PRE_SESSION"
+    if now_et >= session[1]:
+        return f"CLOSE_{session[1]:%H%M}"
     if current < time(12, 0):
         return "OPEN_0930"
     if current < time(16, 0):
@@ -663,6 +672,8 @@ class BuyBoardScheduler:
                 "candidate_count": self._snapshot.candidate_count,
                 "last_refresh_count": self._snapshot.last_refresh_count,
                 "last_success_count": self._snapshot.last_success_count,
+                "last_session_date": self._snapshot.last_session_date,
+                "calendar_version": NYSE_CALENDAR_VERSION,
             }
 
     def _run(self) -> None:
@@ -673,11 +684,23 @@ class BuyBoardScheduler:
                 target = _next_refresh_time(now_et)
                 with self._lock:
                     self._snapshot.next_refresh_at = target.astimezone(UTC).isoformat()
-                timeout = max(1.0, (target - now_et).total_seconds())
+                timeout = _refresh_wait_seconds(now_et, target)
                 if self._stop.wait(timeout=timeout):
                     break
+                # A suspended process may wake after the target session ended.
+                # Never turn that missed target into a weekend/holiday quote.
+                if not _scheduled_refresh_due(target, datetime.now(_ET)):
+                    continue
                 label = "scheduled_open" if target.timetz().replace(tzinfo=None) == time(9, 30) else "scheduled_close"
                 self._refresh(label)
+                with self._lock:
+                    self._snapshot.last_session_date = target.date().isoformat()
+        except ValueError as exc:
+            log.warning("buy_board.calendar_unavailable", error=str(exc))
+            with self._lock:
+                self._snapshot.next_refresh_at = None
+                self._snapshot.last_error = "market_calendar_unavailable"
+                self._snapshot.last_action = "buy board paused: market calendar unavailable"
         finally:
             with self._lock:
                 self._snapshot.running = False
@@ -711,6 +734,7 @@ class BuyBoardScheduler:
                 session.commit()
             with self._lock:
                 self._snapshot.last_refresh_at = _now_utc().isoformat()
+                self._snapshot.last_session_date = None
                 incomplete = int(summary["successes"]) < int(summary["candidate_count"])
                 self._snapshot.last_action = (
                     f"degraded buy board ({summary['successes']}/{summary['candidate_count']} quotes)"
@@ -735,15 +759,32 @@ class BuyBoardScheduler:
 
 
 def _next_refresh_time(now_et: datetime) -> datetime:
-    today = now_et.date()
-    open_refresh = datetime.combine(today, time(9, 30), tzinfo=_ET)
-    close_refresh = datetime.combine(today, time(16, 0), tzinfo=_ET)
-    if now_et < open_refresh:
-        return open_refresh
-    if now_et < close_refresh:
-        return close_refresh
-    tomorrow = today + timedelta(days=1)
-    return datetime.combine(tomorrow, time(9, 30), tzinfo=_ET)
+    if now_et.tzinfo is None:
+        raise ValueError("Buy-board scheduling requires an aware timestamp")
+    now_et = now_et.astimezone(_ET)
+    day = now_et.date()
+    while True:
+        session = nyse_session(day)
+        if session is not None:
+            for target in session:
+                if now_et < target:
+                    return target
+        day += timedelta(days=1)
+
+
+def _refresh_wait_seconds(now: datetime, target: datetime) -> float:
+    return max(1.0, (target.astimezone(UTC) - now.astimezone(UTC)).total_seconds())
+
+
+def _scheduled_refresh_due(target: datetime, observed: datetime) -> bool:
+    observed = observed.astimezone(_ET)
+    session = nyse_session(observed.date())
+    if session is None or target not in session or observed < target:
+        return False
+    # A close quote may run slightly after the scheduled close; an open quote
+    # delayed beyond the close must be skipped rather than relabelled as fresh.
+    deadline = session[1] + timedelta(minutes=5) if target == session[1] else session[1]
+    return observed <= deadline
 
 
 BUY_BOARD = BuyBoardScheduler()

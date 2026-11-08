@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import threading
+import time
+from copy import deepcopy
 from datetime import UTC, date, datetime
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -9,6 +13,41 @@ from sqlalchemy.orm import Session
 from accountant.db.models import Filing
 
 SOURCE_INTEGRITY_VERSION = "SOURCE_INTEGRITY_V1"
+SOURCE_INTEGRITY_CACHE_TTL_SECONDS = 30.0
+
+
+class SourceIntegrityCache:
+    """Single-flight, engine-scoped cache for public monitoring requests.
+
+    Do not cache failures or serve expired evidence. Counts remain exact where
+    the builder requires them; generated_at records the evidence time, not the
+    time of a cache hit. Weak keys avoid retaining disposed test/tenant engines.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: WeakKeyDictionary[Any, tuple[float, dict[str, Any]]] = WeakKeyDictionary()
+
+    def snapshot(self, session: Session) -> dict[str, Any]:
+        bind = session.get_bind()
+        engine = getattr(bind, "engine", bind)
+        with self._lock:
+            cached = self._entries.get(engine)
+            if cached is not None and time.monotonic() - cached[0] < SOURCE_INTEGRITY_CACHE_TTL_SECONDS:
+                return deepcopy(cached[1])
+            # Keep the lock during refresh so simultaneous anonymous requests
+            # cannot all start the same expensive count queries.
+            snapshot = build_source_integrity_snapshot(session)
+            snapshot["truth_policy"]["snapshot_cache_ttl_seconds"] = SOURCE_INTEGRITY_CACHE_TTL_SECONDS
+            self._entries[engine] = (time.monotonic(), deepcopy(snapshot))
+            return snapshot
+
+
+_PUBLIC_SOURCE_INTEGRITY_CACHE = SourceIntegrityCache()
+
+
+def cached_source_integrity_snapshot(session: Session) -> dict[str, Any]:
+    return _PUBLIC_SOURCE_INTEGRITY_CACHE.snapshot(session)
 
 
 def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
