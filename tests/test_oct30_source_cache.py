@@ -13,7 +13,7 @@ def test_public_status_requests_do_not_repeat_canonical_scans(test_session, test
     scans = []
 
     def record(_connection, _cursor, statement, _parameters, _context, _many):
-        if "count(*) from canonical_facts" in statement.lower():
+        if "count(" in statement.lower() and "canonical_facts" in statement.lower():
             scans.append(statement)
 
     event.listen(test_engine, "before_cursor_execute", record)

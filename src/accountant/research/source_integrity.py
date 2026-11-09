@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from accountant.db.models import Filing
 
-SOURCE_INTEGRITY_VERSION = "SOURCE_INTEGRITY_V1"
+SOURCE_INTEGRITY_VERSION = "SOURCE_INTEGRITY_V2_EXACT_COHORTS"
 SOURCE_INTEGRITY_CACHE_TTL_SECONDS = 30.0
 
 
@@ -61,19 +61,13 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
     is_postgres = bind.dialect.name == "postgresql"
     generated_at = datetime.now(UTC)
 
-    company_count = _exact_scalar(session, "select count(*) from companies")
+    company_count, reported_companies, reported_with_bottlenecks = _company_coverage_counts(session)
     filings_count = _estimated_count(session, "filings") if is_postgres else _exact_scalar(session, "select count(*) from filings")
     raw_fact_count = _estimated_count(session, "raw_facts") if is_postgres else _exact_scalar(session, "select count(*) from raw_facts")
-    canonical_fact_count = (
-        _estimated_count(session, "canonical_facts")
-        if is_postgres
-        else _exact_scalar(session, "select count(*) from canonical_facts")
-    )
-    canonical_lineage_count = _exact_scalar(
-        session,
-        "select count(*) from canonical_facts where source_fact_hash is not null or raw_fact_id is not null",
-    )
-    canonical_fact_count_exact = _exact_scalar(session, "select count(*) from canonical_facts")
+    # Numerator and denominator must be from the same statement snapshot, not
+    # two scans that can observe different concurrent ingestion states.
+    canonical_fact_count_exact, canonical_lineage_count = _canonical_lineage_counts(session)
+    canonical_fact_count = _estimated_count(session, "canonical_facts") if is_postgres else canonical_fact_count_exact
     statement_snapshot_count = _exact_scalar(session, "select count(*) from statement_snapshots")
     report_count = _exact_scalar(session, "select count(*) from company_reports")
     report_card_count = _exact_scalar(session, "select count(*) from report_cards")
@@ -108,11 +102,11 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         """,
     )
 
-    report_coverage_pct = _pct(report_count, company_count)
-    bottleneck_coverage_pct = _pct(bottleneck_count, report_count)
-    canonical_to_raw_pct = _pct(canonical_fact_count, raw_fact_count) if raw_fact_count else None
-    canonical_lineage_coverage_pct = _pct(canonical_lineage_count, canonical_fact_count_exact)
-    statement_to_report_pct = _pct(statement_snapshot_count, report_count)
+    report_coverage_pct = _pct(reported_companies, company_count)
+    bottleneck_coverage_pct = _pct(reported_with_bottlenecks, reported_companies)
+    canonical_to_raw_ratio_estimate = canonical_fact_count / raw_fact_count if raw_fact_count else None
+    canonical_lineage_coverage_pct = _pct(canonical_lineage_count, canonical_fact_count_exact) if canonical_fact_count_exact else None
+    statements_per_report = statement_snapshot_count / report_count if report_count else None
 
     warnings: list[str] = []
     if latest_filing_date is None:
@@ -121,14 +115,13 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         warnings.append(f"Latest SEC filing date is {days_since_latest} days old.")
     if raw_source_sample and any(item["source"] != "companyfacts" for item in raw_source_sample):
         warnings.append("Raw fact sample includes non-CompanyFacts source types.")
-    if raw_fact_count == 0 and canonical_fact_count > 0:
-        warnings.append("Raw SEC facts are archived off-host; canonical records rely on stored lineage.")
     if report_coverage_pct < 95:
         warnings.append("Company report coverage is below 95%.")
     if bottleneck_coverage_pct < 95:
         warnings.append("Bottleneck cache coverage is below 95% of reports.")
-    if canonical_to_raw_pct is not None and canonical_to_raw_pct < 10:
-        warnings.append("Canonical mapping coverage is below 10% of raw facts.")
+    # Totals span different cohorts (including archived raw facts and multiple
+    # derived facts per source). They cannot measure mapping completeness.
+    warnings.append("Raw-to-canonical mapping coverage is not measured; count estimates are not coverage.")
     if not price_sources or all(item["source"] == "NONE" for item in price_sources):
         warnings.append("No buy-board market price source is currently populated.")
 
@@ -136,7 +129,6 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
         latest_days=days_since_latest,
         report_coverage_pct=report_coverage_pct,
         bottleneck_coverage_pct=bottleneck_coverage_pct,
-        canonical_to_raw_pct=canonical_to_raw_pct,
         warnings=warnings,
     )
 
@@ -166,11 +158,20 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
             "company_reports": report_count,
             "report_cards": report_card_count,
             "bottleneck_snapshots": bottleneck_count,
+            "reported_companies": reported_companies,
+            "reported_companies_with_bottlenecks": reported_with_bottlenecks,
             "report_coverage_pct": round(report_coverage_pct, 2),
             "bottleneck_coverage_pct": round(bottleneck_coverage_pct, 2),
-            "canonical_to_raw_pct": round(canonical_to_raw_pct, 2) if canonical_to_raw_pct is not None else None,
-            "canonical_lineage_coverage_pct": round(canonical_lineage_coverage_pct, 2),
-            "statement_to_report_pct": round(statement_to_report_pct, 2),
+            # Deprecated false-coverage fields remain null for old clients.
+            "canonical_to_raw_pct": None,
+            "statement_to_report_pct": None,
+            "canonical_to_raw_ratio_estimate": canonical_to_raw_ratio_estimate,
+            "statements_per_report": statements_per_report,
+            "mapping_coverage_pct": None,
+            "mapping_coverage_status": "NOT_MEASURED",
+            "canonical_facts_exact": canonical_fact_count_exact,
+            "canonical_facts_with_lineage": canonical_lineage_count,
+            "canonical_lineage_coverage_pct": round(canonical_lineage_coverage_pct, 2) if canonical_lineage_coverage_pct is not None else None,
         },
         "market_data": {
             "role": "supporting price/tradability data; not accountant source of truth",
@@ -181,6 +182,8 @@ def build_source_integrity_snapshot(session: Session) -> dict[str, Any]:
             "accounting_source_of_truth": "SEC EDGAR filings and SEC CompanyFacts/XBRL facts",
             "market_source_of_truth": "Alpaca Accountant where populated; otherwise unavailable",
             "execution_authority": "none in Accountant; trading terminal owns execution",
+            "grade_count_basis": "exact company-cohort counts only; planner estimates excluded",
+            "coverage_rule_version": SOURCE_INTEGRITY_VERSION,
         },
     }
 
@@ -190,14 +193,11 @@ def _source_grade(
     latest_days: int | None,
     report_coverage_pct: float,
     bottleneck_coverage_pct: float,
-    canonical_to_raw_pct: float | None,
     warnings: list[str],
 ) -> str:
     if latest_days is None or report_coverage_pct < 70 or bottleneck_coverage_pct < 70:
         return "FAILED"
-    if latest_days > 7 or report_coverage_pct < 90 or (
-        canonical_to_raw_pct is not None and canonical_to_raw_pct < 5
-    ):
+    if latest_days > 7 or report_coverage_pct < 90:
         return "DEGRADED"
     if warnings:
         return "WATCH"
@@ -206,6 +206,29 @@ def _source_grade(
 
 def _exact_scalar(session: Session, sql: str) -> int:
     return int(session.execute(text(sql)).scalar() or 0)
+
+
+def _company_coverage_counts(session: Session) -> tuple[int, int, int]:
+    row = session.execute(text("""
+        select count(*),
+               coalesce(sum(case when has_report then 1 else 0 end), 0),
+               coalesce(sum(case when has_report and has_bottleneck then 1 else 0 end), 0)
+        from (
+            select exists(select 1 from company_reports r where r.company_id = c.id) as has_report,
+                   exists(select 1 from company_bottleneck_snapshots b where b.company_id = c.id) as has_bottleneck
+            from companies c
+        ) cohort
+    """)).one()
+    return int(row[0]), int(row[1]), int(row[2])
+
+
+def _canonical_lineage_counts(session: Session) -> tuple[int, int]:
+    row = session.execute(text("""
+        select count(*),
+               coalesce(sum(case when source_fact_hash is not null or raw_fact_id is not null then 1 else 0 end), 0)
+        from canonical_facts
+    """)).one()
+    return int(row[0]), int(row[1])
 
 
 def _estimated_count(session: Session, table_name: str) -> int:
