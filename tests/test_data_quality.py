@@ -17,7 +17,6 @@ def test_archived_raw_facts_do_not_create_false_mapping_failure() -> None:
             latest_days=0,
             report_coverage_pct=100.0,
             bottleneck_coverage_pct=100.0,
-            canonical_to_raw_pct=None,
             warnings=[],
         )
         == "STRONG"
